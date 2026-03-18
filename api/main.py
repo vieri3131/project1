@@ -16,6 +16,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/")
+def root():
+    return {"message": "Apt Alert API is running. Use /listings to query data."}
+
 @app.get("/listings")
 def get_listings(
     region_code: str = Query(None, description="시군구 코드 (예: 11650)"),
