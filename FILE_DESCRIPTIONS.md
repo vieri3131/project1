@@ -14,10 +14,12 @@ This document describes the purpose and behavior of each file in this repository
   - missing environment variables fail early
 
 ## api/main.py
-- FastAPI service exposing `/listings` endpoint.
-- Reads `transactions` table joined with `properties` table from Supabase.
+- FastAPI service exposing `/` and `/listings` endpoints.
+- Root `/` returns a simple status message.
+- `/listings` reads `transactions` table joined with `properties` table from Supabase.
 - Supports query filters: `region_code`, `dong`, `min_area`, `max_area`, `limit`.
 - Ensures empty results return `[]` and `count: 0`.
+- CORS enabled for all origins (`*`) to allow frontend (Vercel) to call the API.
 
 ## requirements.txt
 - Lists runtime dependencies:
@@ -26,6 +28,10 @@ This document describes the purpose and behavior of each file in this repository
   - `requests`
   - `fastapi`
   - `uvicorn`
+
+## .gitignore
+- Excludes `.env`, `__pycache__/`, `*.pyc`, and virtual environment folders from git tracking.
+- Protects secrets from being pushed to GitHub.
 
 ## .env (not committed)
 - Expected variables:
