@@ -51,4 +51,5 @@ def get_listings(
         query = query.lte("properties.area_size", max_area)
 
     result = query.execute()
-    return {"data": result.data, "count": len(result.data)}
+    data = result.data or []
+    return {"data": data, "count": len(data)}

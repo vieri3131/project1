@@ -7,11 +7,40 @@ from supabase import create_client
 
 load_dotenv()
 MOLIT_API_KEY = os.getenv("MOLIT_API_KEY")
-supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+if not MOLIT_API_KEY:
+    raise RuntimeError("MOLIT_API_KEY is required in environment variables")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_URL and SUPABASE_KEY are required in environment variables")
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # 전국 시군구 코드 (행정안전부 기준)
 REGION_CODES = [
-    "11110","11140","11170",
+    "11110","11140","11170","11200","11215","11230","11260","11290","11305","11320",
+    "11350","11380","11410","11440","11470","11500","11530","11545","11560","11590",
+    "11620","11650","11680","11710","11740","21110","21130","21150","21170","21190",
+    "21210","21230","22110","22130","22150","22170","22190","22210","22230","23110",
+    "23130","23150","23170","23190","23210","23230","23250","23270","23290","23310",
+    "23330","24110","24130","24140","24160","24170","24180","24190","24210","24230",
+    "24250","24260","24270","24280","24290","25110","25130","25150","25170","25190",
+    "25210","25230","25250","26110","26140","26170","26200","26230","26260","26290",
+    "26320","26350","26380","26410","26440","26470","26500","26530","26560","27110",
+    "27140","27170","27200","27230","27260","27290","27320","27350","28110","28140",
+    "28177","28185","28200","28237","28245","28260","29110","29140","29155","29170",
+    "29200","30110","30140","30170","30200","30230","31110","31140","31170","31200",
+    "31710","32110","32130","32150","32170","32190","32210","32230","32250","32710",
+    "32720","33110","33130","33150","33170","33350","33360","33380","33390","33400",
+    "33410","34110","34130","34140","34150","34160","34170","34180","34190","34210",
+    "34230","34250","34260","34270","34280","35110","35130","35150","35170","35189",
+    "35210","35220","35230","35240","35250","35260","35270","35280","36110","36130",
+    "36150","36170","36190","36210","36220","36230","36240","36250","36260","36270",
+    "36280","37110","37130","37150","37170","37190","37210","37230","37250","37270",
+    "37280","37290","37300","37310","37320","38110","38130","38150","38170","38190",
+    "38210","38230","38240","38250","38260","38270","38280","38290","38300","38310",
+    "39110","39130",
 ]
 
 def get_year_month_range(months=3):
@@ -32,7 +61,10 @@ def fetch_transactions(region_code, year, month):
         "pageNo": 1,
     }
     res = requests.get(url, params=params, timeout=10)
-    root = ET.fromstring(res.content)
+    try:
+        root = ET.fromstring(res.content)
+    except ET.ParseError as e:
+        raise ValueError(f"Invalid XML response for {region_code}/{year}-{month:02d}: {e}") from e
     return root.findall(".//item")
 
 def get(item, tag):
@@ -65,20 +97,30 @@ def parse_item(item, region_code):
     if not apt_seq or not area_size or not deal_amount or not deal_date:
         return None, None
 
+    try:
+        area_size_value = float(area_size)
+    except ValueError:
+        return None, None
+
+    try:
+        price_value = int(deal_amount.replace(",", ""))
+    except ValueError:
+        return None, None
+
     property_data = {
         "apt_seq":     apt_seq,
         "apt_name":    get(item, "aptNm"),
         "region_code": region_code,
         "dong":        get(item, "umdNm") or get(item, "umdCd"),
         "jibun":       get(item, "jibun"),
-        "area_size":   float(area_size),
+        "area_size":   area_size_value,
         "build_year":  int(get(item, "buildYear")) if get(item, "buildYear") else None,
     }
 
     transaction_data = {
         "apt_seq":           apt_seq,          # 나중에 property_id로 교체용
-        "area_size":         float(area_size),  # property 매핑용
-        "price":             int(deal_amount.replace(",", "")),
+        "area_size":         area_size_value,  # property 매핑용
+        "price":             price_value,
         "deal_date":         deal_date,
         "floor":             int(get(item, "floor")) if get(item, "floor") else None,
         "transaction_type":  get(item, "dealingGbn"),
@@ -136,7 +178,7 @@ def batch_upsert_transactions(transactions, id_map):
         seen.add(dedup_key)
         rows.append(t)
 
-    BATCH_SIZE = 200
+    BATCH_SIZE = 100
     for i in range(0, len(rows), BATCH_SIZE):
         batch = rows[i:i + BATCH_SIZE]
         supabase.table("transactions").upsert(

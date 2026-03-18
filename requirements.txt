@@ -1,5 +1,5 @@
-supabase
-python-dotenv
-requests
-fastapi
-uvicorn
+supabase==2.15.3
+python-dotenv==1.0.0
+requests==2.31.0
+fastapi==0.115.2
+uvicorn==0.24.0
