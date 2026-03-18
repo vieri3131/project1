@@ -11,7 +11,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://apt-alert-frontend.vercel.app"],
     allow_methods=["GET"],
     allow_headers=["*"],
 )
