@@ -1,0 +1,29 @@
+name: Daily Data Collection
+
+on:
+  schedule:
+    - cron: "0 21 * * *"  # 매일 오전 6시 KST (UTC+9 → UTC 21:00)
+  workflow_dispatch:        # 수동 실행 버튼도 활성화
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run collect.py
+        env:
+          MOLIT_API_KEY: ${{ secrets.MOLIT_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python collect.py
