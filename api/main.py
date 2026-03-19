@@ -26,7 +26,6 @@ def get_listings(
     dong: str = Query(None, description="법정동명 (예: 서초동)"),
     min_area: float = Query(None, description="최소 전용면적 (㎡)"),
     max_area: float = Query(None, description="최대 전용면적 (㎡)"),
-    limit: int = Query(50, description="최대 결과 수"),
 ):
     # properties + transactions 조인 쿼리
     query = (
@@ -49,7 +48,6 @@ def get_listings(
         """)
         .eq("is_cancelled", False)
         .order("deal_date", desc=True)
-        .limit(limit)
     )
 
     # 필터 적용
