@@ -39,7 +39,7 @@
 
 | Task | Team | Status |
 |---|---|---|
-| Daily 6am cron · automatic data collection (`collect.py`) | A | ❌ Todo |
+| Daily 6am cron · automatic data collection (`collect.py`) | A | ✅ Done |
 | Auto alert on discount detection · 3,000 free alerts/month | B | ❌ Todo |
 
 ---
@@ -56,6 +56,6 @@
 
 ## Current Focus
 
-> **Team A — Next task: Stage 4 daily cron setup**
-> Automate `collect.py` to run every day at 6am.
-> Deployment platform TBD (Railway / Render / GitHub Actions / Docker).
+> **Team A — Next task: Stage 5 Dockerfile + self-ping**
+> Daily cron is live via GitHub Actions (`.github/workflows/daily-collect.yml`).
+> Next: Dockerize the API and add self-ping to prevent sleep on free hosting.
