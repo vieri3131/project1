@@ -15,14 +15,14 @@
 
 ---
 
-## Stage 2 — 핵심 백엔드 개발 🔄 IN PROGRESS (4~5일)
+## Stage 2 — 핵심 백엔드 개발 ✅ DONE (4~5일)
 
 | Task | Team | Status |
 |---|---|---|
 | collect.py — MOLIT XML parsing · Supabase upsert (all 212 regions, 3 months) | A | ✅ Done |
 | GET /listings — region · type params · Supabase query | A | ✅ Done |
 | 6-month average · discount rate calculation · grade classification | B | ✅ Done (in `lib/filter.js`) |
-| GET /filter — discount rate · grade params · sorting | B | ❌ Todo (currently handled client-side) |
+| GET /filter — discount rate · grade params · sorting | A | ✅ Done (in `api/main.py`, 4-tier fallback logic) |
 
 ---
 
@@ -60,11 +60,10 @@
 
 ## Current Focus
 
-> **Stage 2 is IN PROGRESS. Stage 3 is partially done (Team B jumped ahead).**
+> **Stage 2 DONE. Stage 3 is partially done (Team B jumped ahead). Now entering Stage 3 completion.**
 >
 > **Immediate blocker:** Frontend is falling back to dummy data — real listings won't show until the frontend–backend API integration is complete.
 >
 > **Next tasks:**
-> - Team A: Confirm or implement GET `/filter` endpoint (discount/grade params)
-> - Team A + B: Wire up frontend to live `/listings` API and remove dummy data fallback
-> - Team A: Then proceed to Stage 5 — Dockerfile + self-ping
+> - Team A + B: Wire up frontend to live `/filter` API and remove dummy data fallback
+> - Team A: Proceed to Stage 5 — Dockerfile + self-ping
