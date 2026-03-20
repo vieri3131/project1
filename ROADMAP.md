@@ -21,17 +21,21 @@
 |---|---|---|
 | collect.py — MOLIT XML parsing · Supabase upsert (all 212 regions, 3 months) | A | ✅ Done |
 | GET /listings — region · type params · Supabase query | A | ✅ Done |
-| 6-month average · discount rate calculation · grade classification | B | ❓ Check with B |
-| GET /filter — discount rate · grade params · sorting | B | ❓ Check with B |
+| 6-month average · discount rate calculation · grade classification | B | ✅ Done (in `lib/filter.js`) |
+| GET /filter — discount rate · grade params · sorting | B | ❌ Todo (currently handled client-side) |
 
 ---
 
-## Stage 3 — 프론트엔드 개발 ⏳ NOT STARTED (3~4일)
+## Stage 3 — 프론트엔드 개발 ⚠️ PARTIALLY DONE (3~4일)
 
 | Task | Team | Status |
 |---|---|---|
 | /listings API integration · price badge · sorting · loading | A | ❌ Todo |
-| Discount rate slider · region selection · email input | B | ❌ Todo |
+| Discount rate slider · region selection · email input | B | ✅ Done |
+| FilterBar · ListingCard · EmailForm components | B | ✅ Done |
+| Discount/grade calculation logic (`lib/filter.js`) | B | ✅ Done |
+| Email subscription via Resend | B | ✅ Done |
+| Frontend–backend API integration (currently using dummy data fallback) | A + B | ❌ Todo |
 
 ---
 
@@ -56,6 +60,11 @@
 
 ## Current Focus
 
-> **Team A — Next task: Stage 5 Dockerfile + self-ping**
-> Daily cron is live via GitHub Actions (`.github/workflows/daily-collect.yml`).
-> Next: Dockerize the API and add self-ping to prevent sleep on free hosting.
+> **Stage 2 is IN PROGRESS. Stage 3 is partially done (Team B jumped ahead).**
+>
+> **Immediate blocker:** Frontend is falling back to dummy data — real listings won't show until the frontend–backend API integration is complete.
+>
+> **Next tasks:**
+> - Team A: Confirm or implement GET `/filter` endpoint (discount/grade params)
+> - Team A + B: Wire up frontend to live `/listings` API and remove dummy data fallback
+> - Team A: Then proceed to Stage 5 — Dockerfile + self-ping
