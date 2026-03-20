@@ -26,16 +26,16 @@
 
 ---
 
-## Stage 3 — 프론트엔드 개발 ⚠️ PARTIALLY DONE (3~4일)
+## Stage 3 — 프론트엔드 개발 ✅ DONE (3~4일)
 
 | Task | Team | Status |
 |---|---|---|
-| /listings API integration · price badge · sorting · loading | A | ❌ Todo |
+| /listings API integration · price badge · sorting · loading | A | ✅ Done (via /filter endpoint) |
 | Discount rate slider · region selection · email input | B | ✅ Done |
 | FilterBar · ListingCard · EmailForm components | B | ✅ Done |
 | Discount/grade calculation logic (`lib/filter.js`) | B | ✅ Done |
 | Email subscription via Resend | B | ✅ Done |
-| Frontend–backend API integration (currently using dummy data fallback) | A + B | ❌ Todo |
+| Frontend–backend API integration (currently using dummy data fallback) | A + B | ✅ Done (`page.js` → `/filter`, dummy fallback kept for local dev) |
 
 ---
 
@@ -60,10 +60,9 @@
 
 ## Current Focus
 
-> **Stage 2 DONE. Stage 3 is partially done (Team B jumped ahead). Now entering Stage 3 completion.**
->
-> **Immediate blocker:** Frontend is falling back to dummy data — real listings won't show until the frontend–backend API integration is complete.
+> **Stages 1–3 DONE. Now entering Stage 4 & 5.**
 >
 > **Next tasks:**
-> - Team A + B: Wire up frontend to live `/filter` API and remove dummy data fallback
-> - Team A: Proceed to Stage 5 — Dockerfile + self-ping
+> - Team B: Auto email alert on new discount detections (Stage 4)
+> - Team A: Dockerfile · env vars · self-ping for Render deployment (Stage 5)
+> - Team A + B: GitHub auto-deploy setup · QA · README
