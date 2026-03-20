@@ -43,7 +43,7 @@
 
 | Task | Team | Status |
 |---|---|---|
-| Daily 6am cron · automatic data collection (`collect.py`) | A | ✅ Done |
+| Daily 9am cron · automatic data collection (`collect.py`) | A | ✅ Done |
 | Auto alert on discount detection · 3,000 free alerts/month | B | ❌ Todo |
 
 ---
