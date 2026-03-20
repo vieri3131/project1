@@ -186,7 +186,7 @@ def batch_upsert_transactions(transactions, id_map):
         ).execute()
 
 def main():
-    periods = get_year_month_range(months=6)
+    periods = get_year_month_range(months=3)
     total = 0
 
     for region_code in REGION_CODES:

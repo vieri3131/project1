@@ -19,7 +19,7 @@
 
 | Task | Team | Status |
 |---|---|---|
-| collect.py — MOLIT XML parsing · Supabase upsert (all 212 regions, 6 months) | A | ✅ Done |
+| collect.py — MOLIT XML parsing · Supabase upsert (all 212 regions, 3 months) | A | ✅ Done |
 | GET /listings — region · type params · Supabase query | A | ✅ Done |
 | 6-month average · discount rate calculation · grade classification | B | ✅ Done (in `lib/filter.js`) |
 | GET /filter — discount rate · grade params · sorting | A | ✅ Done (in `api/main.py`, 4-tier fallback logic) |
