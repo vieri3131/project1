@@ -38,7 +38,7 @@ def get_listings(
             floor,
             transaction_type,
             is_cancelled,
-            properties (
+            properties!inner (
                 apt_seq,
                 apt_name,
                 region_code,
@@ -199,7 +199,7 @@ def get_filter(
             floor,
             transaction_type,
             is_cancelled,
-            properties (
+            properties!inner (
                 apt_seq,
                 apt_name,
                 region_code,

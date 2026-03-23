@@ -90,6 +90,13 @@ def parse_item(item, region_code):
     cdeal_day  = get(item, "cdealDay")
     is_cancelled = bool(cdeal_type or cdeal_day)
 
+    cancel_date = None
+    if cdeal_day and year and month:
+        try:
+            cancel_date = f"{year}-{int(month):02d}-{int(cdeal_day):02d}"
+        except (ValueError, TypeError):
+            cancel_date = None
+
     apt_seq     = get(item, "aptSeq")
     area_size   = get(item, "excluUseAr")
     deal_amount = get(item, "dealAmount")
@@ -125,7 +132,7 @@ def parse_item(item, region_code):
         "floor":             int(get(item, "floor")) if get(item, "floor") else None,
         "transaction_type":  get(item, "dealingGbn"),
         "is_cancelled":      is_cancelled,
-        "cancel_date":       None,
+        "cancel_date":       cancel_date,
         "registration_date": parse_rgs_date(get(item, "rgstDate")),
     }
 
