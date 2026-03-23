@@ -352,7 +352,7 @@ def root():
             "/listings",
             "/filter",
             "/regions",
-            "/subscriptions",
+            "/subscribers",
             "/subscribe",
         ],
         "supabase_connected": supabase is not None,
@@ -517,7 +517,7 @@ def _normalize_subscription_payload(payload: dict) -> dict:
     }
 
 
-@app.post("/subscriptions")
+@app.post("/subscribers")
 def create_subscription(payload: dict = Body(...)):
     sb = get_supabase()
     data = _normalize_subscription_payload(payload)
@@ -531,7 +531,7 @@ def create_subscription(payload: dict = Body(...)):
     try:
         # 중복 조건이 있으면 기존 것 반환
         existing = (
-            sb.table("subscriptions")
+            sb.table("subscribers")
             .select("*")
             .eq("email", data["email"])
             .eq("region", data["region"])
@@ -551,7 +551,7 @@ def create_subscription(payload: dict = Body(...)):
             }
 
         inserted = (
-            sb.table("subscriptions")
+            sb.table("subscribers")
             .insert(
                 {
                     "email": data["email"],
@@ -585,15 +585,15 @@ def create_subscription_alias(payload: dict = Body(...)):
     return create_subscription(payload)
 
 
-@app.get("/subscriptions")
-def get_subscriptions(
+@app.get("/subscribers")
+def get_subscribers(
     email: str = Query(None, description="특정 이메일로 필터링"),
     active_only: bool = Query(True, description="활성 구독만 조회"),
 ):
     sb = get_supabase()
 
     try:
-        query = sb.table("subscriptions").select("*").order("created_at", desc=True)
+        query = sb.table("subscribers").select("*").order("created_at", desc=True)
 
         if email:
             query = query.eq("email", email)
@@ -610,16 +610,16 @@ def get_subscriptions(
             "count": len(rows),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"subscriptions query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"subscribers query failed: {str(e)}")
 
 
-@app.delete("/subscriptions/{subscription_id}")
+@app.delete("/subscribers/{subscription_id}")
 def deactivate_subscription(subscription_id: str):
     sb = get_supabase()
 
     try:
         updated = (
-            sb.table("subscriptions")
+            sb.table("subscribers")
             .update({"is_active": False})
             .eq("id", subscription_id)
             .execute()
