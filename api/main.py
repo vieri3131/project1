@@ -1,110 +1,164 @@
+import math
 import os
+import re
 from datetime import date
-from fastapi import FastAPI, Query
-from fastapi.middleware.cors import CORSMiddleware
-from supabase import create_client
+from typing import Any
+
 from dotenv import load_dotenv
+from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from supabase import Client, create_client
 
 load_dotenv()
-supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
-app = FastAPI()
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "*")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET"],
-    allow_headers=["*"],
-)
+supabase: Client | None = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-@app.get("/")
-def root():
-    return {"message": "Apt Alert API is running. Use /listings to query data."}
+app = FastAPI(title="Apt Alert API", version="0.2.0")
 
-@app.get("/listings")
-def get_listings(
-    region_code: str = Query(None, description="시군구 코드 (예: 11650)"),
-    dong: str = Query(None, description="법정동명 (예: 서초동)"),
-    min_area: float = Query(None, description="최소 전용면적 (㎡)"),
-    max_area: float = Query(None, description="최대 전용면적 (㎡)"),
-):
-    # properties + transactions 조인 쿼리
-    query = (
-        supabase.table("transactions")
-        .select("""
-            id,
-            price,
-            deal_date,
-            floor,
-            transaction_type,
-            is_cancelled,
-            properties!inner (
-                apt_seq,
-                apt_name,
-                region_code,
-                dong,
-                area_size,
-                build_year
-            )
-        """)
-        .eq("is_cancelled", False)
-        .order("deal_date", desc=True)
+# CORS
+if CORS_ALLOWED_ORIGINS.strip() == "*":
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+else:
+    origins = [x.strip() for x in CORS_ALLOWED_ORIGINS.split(",") if x.strip()]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
-    # 필터 적용
-    if region_code:
-        query = query.eq("properties.region_code", region_code)
-    if dong:
-        query = query.eq("properties.dong", dong)
-    if min_area:
-        query = query.gte("properties.area_size", min_area)
-    if max_area:
-        query = query.lte("properties.area_size", max_area)
+# 서울 주요 구 코드 매핑
+REGION_NAME_TO_CODE = {
+    "종로구": "11110",
+    "중구": "11140",
+    "용산구": "11170",
+    "성동구": "11200",
+    "광진구": "11215",
+    "동대문구": "11230",
+    "중랑구": "11260",
+    "성북구": "11290",
+    "강북구": "11305",
+    "도봉구": "11320",
+    "노원구": "11350",
+    "은평구": "11380",
+    "서대문구": "11410",
+    "마포구": "11440",
+    "양천구": "11470",
+    "강서구": "11500",
+    "구로구": "11530",
+    "금천구": "11545",
+    "영등포구": "11560",
+    "동작구": "11590",
+    "관악구": "11620",
+    "서초구": "11650",
+    "강남구": "11680",
+    "송파구": "11710",
+    "강동구": "11740",
+}
+CODE_TO_REGION_NAME = {v: k for k, v in REGION_NAME_TO_CODE.items()}
+VALID_GRADES = {"초급매", "급매", "저평가", "일반"}
 
-    result = query.execute()
-    data = result.data or []
-    return {"data": data, "count": len(data)}
+EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-# --- 시세/할인율 계산 헬퍼 ---
+def get_supabase() -> Client:
+    if supabase is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Supabase environment variables are missing. Check SUPABASE_URL / SUPABASE_KEY.",
+        )
+    return supabase
 
-def _calc_market_avg(all_trades: list, current: dict) -> float | None:
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _months_ago(today: date, n: int) -> date:
+    y = today.year
+    m = today.month - n
+    while m <= 0:
+        y -= 1
+        m += 12
+    return date(y, m, 1)
+
+
+def _normalize_trade_row(row: dict) -> dict:
+    properties = row.get("properties") or {}
+    region_code = properties.get("region_code")
+    district_name = CODE_TO_REGION_NAME.get(region_code)
+    dong_name = properties.get("dong")
+
+    return {
+        **row,
+        "region_name": district_name or dong_name,
+        "dong_name": dong_name,
+        "properties": {
+            **properties,
+            "region_name": district_name or dong_name,
+            "dong_name": dong_name,
+        },
+    }
+
+
+def _calc_market_avg(all_trades: list[dict], current: dict) -> float | None:
     today = date.today()
+    six_months_ago = _months_ago(today, 6)
+    one_year_ago = _months_ago(today, 12)
 
-    def months_ago(n):
-        m = today.month - n
-        y = today.year + m // 12
-        m = m % 12 or 12
-        return date(y, m, 1)
-
-    six_months_ago = months_ago(6)
-    one_year_ago = months_ago(12)
-
-    apt_seq = (current.get("properties") or {}).get("apt_seq")
-    region_code = (current.get("properties") or {}).get("region_code")
-    area = float((current.get("properties") or {}).get("area_size") or 0)
+    props = current.get("properties") or {}
+    apt_seq = props.get("apt_seq")
+    region_code = props.get("region_code")
+    area = _safe_float(props.get("area_size"))
     current_id = current.get("id")
 
-    def valid(t):
+    def valid(t: dict) -> bool:
         if t.get("id") == current_id:
             return False
         if t.get("is_cancelled"):
             return False
-        price = t.get("price")
-        if not price or float(price) <= 0:
+        price = _safe_float(t.get("price"))
+        if price <= 0:
             return False
         return True
 
-    def get_area(t):
-        return float((t.get("properties") or {}).get("area_size") or 0)
+    def get_area(t: dict) -> float:
+        return _safe_float((t.get("properties") or {}).get("area_size"))
 
-    def get_apt_seq(t):
+    def get_apt_seq(t: dict) -> str | None:
         return (t.get("properties") or {}).get("apt_seq")
 
-    def get_region(t):
+    def get_region(t: dict) -> str | None:
         return (t.get("properties") or {}).get("region_code")
 
-    def get_date(t):
+    def get_date(t: dict):
         d = t.get("deal_date")
         if d:
             try:
@@ -116,18 +170,19 @@ def _calc_market_avg(all_trades: list, current: dict) -> float | None:
     valids = [t for t in all_trades if valid(t)]
 
     # 1순위: 같은 단지 + 면적 ±5 + 최근 6개월
-    tier1 = [
-        t for t in valids
+    pool = [
+        t
+        for t in valids
         if get_apt_seq(t) == apt_seq
         and abs(get_area(t) - area) <= 5
         and (get_date(t) or date.min) >= six_months_ago
     ]
-    pool = tier1
 
     # 2순위: 같은 단지 + 면적 ±10 + 최근 12개월
     if len(pool) < 2:
         pool = [
-            t for t in valids
+            t
+            for t in valids
             if get_apt_seq(t) == apt_seq
             and abs(get_area(t) - area) <= 10
             and (get_date(t) or date.min) >= one_year_ago
@@ -136,7 +191,8 @@ def _calc_market_avg(all_trades: list, current: dict) -> float | None:
     # 3순위: 같은 지역 + 면적 ±10 + 최근 12개월
     if len(pool) < 2:
         pool = [
-            t for t in valids
+            t
+            for t in valids
             if get_region(t) == region_code
             and abs(get_area(t) - area) <= 10
             and (get_date(t) or date.min) >= one_year_ago
@@ -145,7 +201,8 @@ def _calc_market_avg(all_trades: list, current: dict) -> float | None:
     # 4순위: 같은 지역 + 면적 ±15
     if len(pool) < 2:
         pool = [
-            t for t in valids
+            t
+            for t in valids
             if get_region(t) == region_code
             and abs(get_area(t) - area) <= 15
         ]
@@ -153,7 +210,7 @@ def _calc_market_avg(all_trades: list, current: dict) -> float | None:
     if not pool:
         return None
 
-    avg = sum(float(t["price"]) for t in pool) / len(pool)
+    avg = sum(_safe_float(t.get("price")) for t in pool) / len(pool)
     return round(avg)
 
 
@@ -167,32 +224,92 @@ def _classify_grade(discount_rate: float) -> str:
     return "일반"
 
 
-def _enrich(all_trades: list, current: dict) -> dict | None:
+def _enrich(all_trades: list[dict], current: dict) -> dict | None:
     market_avg = _calc_market_avg(all_trades, current)
     if not market_avg:
         return None
-    price = float(current.get("price") or 0)
+
+    price = _safe_float(current.get("price"))
+    if price <= 0:
+        return None
+
     discount_rate = round((1 - price / market_avg) * 100, 1)
     grade = _classify_grade(discount_rate)
-    return {**current, "market_avg": market_avg, "discount_rate": discount_rate, "grade": grade}
+
+    normalized = _normalize_trade_row(current)
+    return {
+        **normalized,
+        "market_avg": market_avg,
+        "discount_rate": discount_rate,
+        "grade": grade,
+    }
 
 
-# --- /filter 엔드포인트 ---
+def _paginate(items: list[dict], page: int, per_page: int) -> tuple[list[dict], dict]:
+    safe_page = max(1, page)
+    safe_per_page = max(1, min(100, per_page))
+    total = len(items)
 
-VALID_GRADES = {"초급매", "급매", "저평가", "일반"}
+    start = (safe_page - 1) * safe_per_page
+    end = start + safe_per_page
+    sliced = items[start:end]
 
-@app.get("/filter")
-def get_filter(
-    region_code: str = Query(None, description="시군구 코드 (예: 11650)"),
-    dong: str = Query(None, description="법정동명 (예: 서초동)"),
-    min_area: float = Query(None, description="최소 전용면적 (㎡)"),
-    max_area: float = Query(None, description="최대 전용면적 (㎡)"),
-    min_discount: float = Query(0, description="최소 할인율 (%) — 기본값 0"),
-    grade: str = Query(None, description="급매 등급 (초급매 / 급매 / 저평가 / 일반)"),
+    return sliced, {
+        "page": safe_page,
+        "per_page": safe_per_page,
+        "total": total,
+        "total_pages": max(1, math.ceil(total / safe_per_page)),
+    }
+
+
+def _apply_base_filters(
+    query,
+    region_code: str | None = None,
+    region: str | None = None,
+    dong: str | None = None,
+    min_area: float | None = None,
+    max_area: float | None = None,
 ):
+    picked_region_code = region_code
+
+    if not picked_region_code and region and region != "전체":
+        picked_region_code = REGION_NAME_TO_CODE.get(region)
+
+    if picked_region_code:
+        query = query.eq("properties.region_code", picked_region_code)
+
+    # dong은 그대로 동 이름으로도 쓰고,
+    # region이 매핑 안 되는 문자열이면 dong처럼 취급
+    picked_dong = dong
+    if not picked_dong and region and region != "전체" and region not in REGION_NAME_TO_CODE:
+        picked_dong = region
+
+    if picked_dong and picked_dong != "전체":
+        query = query.eq("properties.dong", picked_dong)
+
+    if min_area is not None:
+        query = query.gte("properties.area_size", min_area)
+
+    if max_area is not None:
+        query = query.lte("properties.area_size", max_area)
+
+    return query
+
+
+def _fetch_raw_trades(
+    *,
+    region_code: str | None = None,
+    region: str | None = None,
+    dong: str | None = None,
+    min_area: float | None = None,
+    max_area: float | None = None,
+) -> list[dict]:
+    sb = get_supabase()
+
     query = (
-        supabase.table("transactions")
-        .select("""
+        sb.table("transactions")
+        .select(
+            """
             id,
             price,
             deal_date,
@@ -207,32 +324,317 @@ def get_filter(
                 area_size,
                 build_year
             )
-        """)
+            """
+        )
         .eq("is_cancelled", False)
         .order("deal_date", desc=True)
     )
 
-    if region_code:
-        query = query.eq("properties.region_code", region_code)
-    if dong:
-        query = query.eq("properties.dong", dong)
-    if min_area:
-        query = query.gte("properties.area_size", min_area)
-    if max_area:
-        query = query.lte("properties.area_size", max_area)
+    query = _apply_base_filters(
+        query,
+        region_code=region_code,
+        region=region,
+        dong=dong,
+        min_area=min_area,
+        max_area=max_area,
+    )
 
-    all_trades = query.execute().data or []
+    result = query.execute()
+    return result.data or []
 
-    # 할인율·등급 계산
-    enriched = [r for t in all_trades if (r := _enrich(all_trades, t))]
 
-    # 필터 적용
-    if min_discount:
-        enriched = [t for t in enriched if t["discount_rate"] >= min_discount]
-    if grade and grade in VALID_GRADES:
-        enriched = [t for t in enriched if t["grade"] == grade]
+@app.get("/")
+def root():
+    return {
+        "success": True,
+        "message": "Apt Alert API is running.",
+        "endpoints": [
+            "/listings",
+            "/filter",
+            "/regions",
+            "/subscriptions",
+            "/subscribe",
+        ],
+        "supabase_connected": supabase is not None,
+    }
 
-    # 할인율 내림차순 정렬
-    enriched.sort(key=lambda t: t["discount_rate"], reverse=True)
 
-    return {"data": enriched, "count": len(enriched)}
+@app.get("/health")
+def health():
+    return {
+        "success": True,
+        "status": "ok",
+        "supabase_connected": supabase is not None,
+    }
+
+
+@app.get("/regions")
+def get_regions():
+    sb = get_supabase()
+
+    try:
+        result = sb.table("properties").select("region_code,dong").limit(50000).execute()
+        rows = result.data or []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"regions query failed: {str(e)}")
+
+    names = {"전체"}
+    items = [{"code": "ALL", "name": "전체", "display_order": 0}]
+
+    for row in rows:
+        code = row.get("region_code")
+        district_name = CODE_TO_REGION_NAME.get(code)
+        if district_name and district_name not in names:
+            names.add(district_name)
+            items.append(
+                {
+                    "code": code,
+                    "name": district_name,
+                    "display_order": len(items),
+                }
+            )
+
+    # district 매핑이 거의 없는 경우를 대비해 dong도 fallback으로 추가
+    if len(items) <= 1:
+        dongs = sorted({row.get("dong") for row in rows if row.get("dong")})
+        for dong_name in dongs:
+            if dong_name not in names:
+                names.add(dong_name)
+                items.append(
+                    {
+                        "code": "",
+                        "name": dong_name,
+                        "display_order": len(items),
+                    }
+                )
+
+    items.sort(key=lambda x: x["display_order"])
+
+    return {
+        "success": True,
+        "data": [item["name"] for item in items],
+        "items": items,
+        "count": len(items),
+    }
+
+
+@app.get("/listings")
+def get_listings(
+    region_code: str = Query(None, description="시군구 코드 (예: 11650)"),
+    region: str = Query(None, description="구 이름 또는 동 이름 (예: 강남구 / 서초동)"),
+    dong: str = Query(None, description="법정동명 (예: 서초동)"),
+    min_area: float = Query(None, description="최소 전용면적 (㎡)"),
+    max_area: float = Query(None, description="최대 전용면적 (㎡)"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(100, ge=1, le=100),
+):
+    try:
+        data = _fetch_raw_trades(
+            region_code=region_code,
+            region=region,
+            dong=dong,
+            min_area=min_area,
+            max_area=max_area,
+        )
+        normalized = [_normalize_trade_row(row) for row in data]
+        sliced, pagination = _paginate(normalized, page, per_page)
+
+        return {
+            "success": True,
+            "data": sliced,
+            "count": pagination["total"],
+            "page": pagination["page"],
+            "per_page": pagination["per_page"],
+            "total_pages": pagination["total_pages"],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"listings query failed: {str(e)}")
+
+
+@app.get("/filter")
+def get_filter(
+    region_code: str = Query(None, description="시군구 코드 (예: 11650)"),
+    region: str = Query(None, description="구 이름 또는 동 이름 (예: 강남구 / 서초동)"),
+    dong: str = Query(None, description="법정동명 (예: 서초동)"),
+    min_area: float = Query(None, description="최소 전용면적 (㎡)"),
+    max_area: float = Query(None, description="최대 전용면적 (㎡)"),
+    min_discount: float = Query(0, description="최소 할인율 (%)"),
+    grade: str = Query(None, description="급매 등급 (초급매 / 급매 / 저평가 / 일반)"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(100, ge=1, le=100),
+):
+    try:
+        all_trades = _fetch_raw_trades(
+            region_code=region_code,
+            region=region,
+            dong=dong,
+            min_area=min_area,
+            max_area=max_area,
+        )
+
+        enriched = [r for t in all_trades if (r := _enrich(all_trades, t))]
+
+        if min_discount:
+            enriched = [t for t in enriched if _safe_float(t.get("discount_rate")) >= min_discount]
+
+        if grade and grade in VALID_GRADES:
+            enriched = [t for t in enriched if t.get("grade") == grade]
+
+        enriched.sort(key=lambda t: _safe_float(t.get("discount_rate")), reverse=True)
+
+        sliced, pagination = _paginate(enriched, page, per_page)
+
+        return {
+            "success": True,
+            "data": sliced,
+            "count": pagination["total"],
+            "page": pagination["page"],
+            "per_page": pagination["per_page"],
+            "total_pages": pagination["total_pages"],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"filter query failed: {str(e)}")
+
+
+def _validate_email(email: str) -> bool:
+    return bool(EMAIL_REGEX.match(email or ""))
+
+
+def _normalize_subscription_payload(payload: dict) -> dict:
+    email = str(payload.get("email") or "").strip()
+    region = str(payload.get("region") or "전체").strip() or "전체"
+    grade = str(payload.get("grade") or "전체").strip() or "전체"
+
+    # 기존 프론트 호환: minDiscount / min_discount 둘 다 받음
+    raw_discount = payload.get("min_discount", payload.get("minDiscount", 5))
+    min_discount = _safe_float(raw_discount, 5)
+
+    return {
+        "email": email,
+        "region": region,
+        "grade": grade,
+        "min_discount": min_discount,
+    }
+
+
+@app.post("/subscriptions")
+def create_subscription(payload: dict = Body(...)):
+    sb = get_supabase()
+    data = _normalize_subscription_payload(payload)
+
+    if not _validate_email(data["email"]):
+        raise HTTPException(status_code=400, detail="올바른 이메일 주소가 아닙니다.")
+
+    if data["min_discount"] < 0 or data["min_discount"] > 100:
+        raise HTTPException(status_code=400, detail="min_discount 값이 올바르지 않습니다.")
+
+    try:
+        # 중복 조건이 있으면 기존 것 반환
+        existing = (
+            sb.table("subscriptions")
+            .select("*")
+            .eq("email", data["email"])
+            .eq("region", data["region"])
+            .eq("grade", data["grade"])
+            .eq("min_discount", data["min_discount"])
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+
+        existing_rows = existing.data or []
+        if existing_rows:
+            return {
+                "success": True,
+                "message": "이미 등록된 구독 조건입니다.",
+                "data": existing_rows[0],
+            }
+
+        inserted = (
+            sb.table("subscriptions")
+            .insert(
+                {
+                    "email": data["email"],
+                    "region": data["region"],
+                    "grade": data["grade"],
+                    "min_discount": data["min_discount"],
+                    "is_active": True,
+                }
+            )
+            .execute()
+        )
+
+        rows = inserted.data or []
+        if not rows:
+            raise HTTPException(status_code=500, detail="구독 저장에 실패했습니다.")
+
+        return {
+            "success": True,
+            "message": "구독 조건이 저장되었습니다.",
+            "data": rows[0],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"subscription insert failed: {str(e)}")
+
+
+# 기존 프론트 호환용 alias
+@app.post("/subscribe")
+def create_subscription_alias(payload: dict = Body(...)):
+    return create_subscription(payload)
+
+
+@app.get("/subscriptions")
+def get_subscriptions(
+    email: str = Query(None, description="특정 이메일로 필터링"),
+    active_only: bool = Query(True, description="활성 구독만 조회"),
+):
+    sb = get_supabase()
+
+    try:
+        query = sb.table("subscriptions").select("*").order("created_at", desc=True)
+
+        if email:
+            query = query.eq("email", email)
+
+        if active_only:
+            query = query.eq("is_active", True)
+
+        result = query.execute()
+        rows = result.data or []
+
+        return {
+            "success": True,
+            "data": rows,
+            "count": len(rows),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"subscriptions query failed: {str(e)}")
+
+
+@app.delete("/subscriptions/{subscription_id}")
+def deactivate_subscription(subscription_id: str):
+    sb = get_supabase()
+
+    try:
+        updated = (
+            sb.table("subscriptions")
+            .update({"is_active": False})
+            .eq("id", subscription_id)
+            .execute()
+        )
+
+        rows = updated.data or []
+        if not rows:
+            raise HTTPException(status_code=404, detail="구독을 찾을 수 없습니다.")
+
+        return {
+            "success": True,
+            "message": "구독이 비활성화되었습니다.",
+            "data": rows[0],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"subscription delete failed: {str(e)}")
