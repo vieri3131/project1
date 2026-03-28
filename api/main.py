@@ -130,6 +130,16 @@ def _months_ago(today: date, n: int) -> date:
     return date(y, m, 1)
 
 
+def _get_deal_date(t: dict) -> date | None:
+    d = t.get("deal_date")
+    if d:
+        try:
+            return date.fromisoformat(str(d)[:10])
+        except ValueError:
+            return None
+    return None
+
+
 def _normalize_trade_row(row: dict) -> dict:
     properties = row.get("properties") or {}
     region_code = properties.get("region_code")
@@ -244,6 +254,138 @@ def _classify_grade(discount_rate: float) -> str:
     return "일반"
 
 
+def _calc_risk_score(all_trades: list[dict], current: dict, market_avg: float) -> dict:
+    """위험 신호 점수 (0–100). 확인된 사기가 아니라 패턴 기반 경고입니다."""
+    props = current.get("properties") or {}
+    apt_seq = props.get("apt_seq")
+    area = _safe_float(props.get("area_size"))
+    current_id = current.get("id")
+    today = date.today()
+    twelve_months_ago = _months_ago(today, 12)
+    six_months_ago = _months_ago(today, 6)
+
+    apt_trades = [
+        t for t in all_trades
+        if (t.get("properties") or {}).get("apt_seq") == apt_seq
+        and t.get("id") != current_id
+    ]
+
+    signals = []
+    score = 0
+
+    # 1. 취소율 — 최근 12개월 내 해당 단지 거래 중 취소 비율
+    recent = [t for t in apt_trades if (_get_deal_date(t) or date.min) >= twelve_months_ago]
+    if recent:
+        cancel_rate = sum(1 for t in recent if t.get("is_cancelled")) / len(recent)
+        if cancel_rate >= 0.4:
+            score += 35
+            signals.append("취소율 높음")
+        elif cancel_rate >= 0.2:
+            score += 15
+            signals.append("취소율 주의")
+
+    # 2. 등기 지연 — 계약일 대비 등기일 평균 간격
+    lags = []
+    for t in apt_trades:
+        deal_d = t.get("deal_date")
+        reg_d = t.get("registration_date")
+        if deal_d and reg_d:
+            try:
+                d1 = date.fromisoformat(str(deal_d)[:10])
+                d2 = date.fromisoformat(str(reg_d)[:10])
+                lag = (d2 - d1).days
+                if 0 <= lag < 3650:
+                    lags.append(lag)
+            except ValueError:
+                pass
+    if lags:
+        avg_lag = sum(lags) / len(lags)
+        if avg_lag > 90:
+            score += 25
+            signals.append("등기 지연 이상")
+        elif avg_lag > 60:
+            score += 10
+            signals.append("등기 지연 주의")
+
+    # 3. 단기 거래 집중 — 최근 6개월 동일 면적대 거래 빈도
+    frequent = [
+        t for t in apt_trades
+        if abs(_safe_float((t.get("properties") or {}).get("area_size")) - area) <= 5
+        and (_get_deal_date(t) or date.min) >= six_months_ago
+        and not t.get("is_cancelled")
+    ]
+    if len(frequent) >= 4:
+        score += 20
+        signals.append("단기 거래 집중")
+    elif len(frequent) >= 3:
+        score += 10
+
+    # 4. 시세 초과 가격 — 시세보다 15% 이상 높은 경우
+    price = _safe_float(current.get("price"))
+    if market_avg > 0 and price > market_avg * 1.15:
+        score += 20
+        signals.append("시세 초과 가격")
+
+    score = min(100, score)
+    level = "위험" if score >= 60 else "주의" if score >= 30 else "낮음"
+    return {"score": score, "level": level, "signals": signals}
+
+
+def _calc_price_trend(all_trades: list[dict], current: dict) -> dict | None:
+    """동일 단지+면적 기준 최근 거래 추세 및 3개월 예측 (최소 4건 필요)."""
+    props = current.get("properties") or {}
+    apt_seq = props.get("apt_seq")
+    area = _safe_float(props.get("area_size"))
+    current_id = current.get("id")
+
+    relevant = [
+        t for t in all_trades
+        if (t.get("properties") or {}).get("apt_seq") == apt_seq
+        and abs(_safe_float((t.get("properties") or {}).get("area_size")) - area) <= 5
+        and not t.get("is_cancelled")
+        and t.get("id") != current_id
+        and _get_deal_date(t) is not None
+        and _safe_float(t.get("price")) > 0
+    ]
+
+    if len(relevant) < 4:
+        return None
+
+    relevant.sort(key=lambda t: _get_deal_date(t))
+
+    base_date = _get_deal_date(relevant[0])
+    points = [
+        ((_get_deal_date(t) - base_date).days, _safe_float(t.get("price")))
+        for t in relevant
+    ]
+
+    n = len(points)
+    mean_x = sum(p[0] for p in points) / n
+    mean_y = sum(p[1] for p in points) / n
+
+    num = sum((p[0] - mean_x) * (p[1] - mean_y) for p in points)
+    den = sum((p[0] - mean_x) ** 2 for p in points)
+
+    if den == 0 or mean_y == 0:
+        return None
+
+    slope = num / den  # 일별 가격 변화량
+    trend_rate = round((slope * 30 / mean_y) * 100, 1)  # 월별 변화율(%)
+
+    direction = "상승" if trend_rate >= 0.5 else "하락" if trend_rate <= -0.5 else "보합"
+
+    intercept = mean_y - slope * mean_x
+    last_x = points[-1][0]
+    forecast_price = max(0, round(intercept + slope * (last_x + 90)))
+
+    return {
+        "direction": direction,
+        "trend_rate": trend_rate,
+        "data_points": n,
+        "forecast_3m": forecast_price,
+    }
+
+
 def _enrich(all_trades: list[dict], current: dict) -> dict | None:
     market_avg = _calc_market_avg(all_trades, current)
     if not market_avg:
@@ -255,6 +397,8 @@ def _enrich(all_trades: list[dict], current: dict) -> dict | None:
 
     discount_rate = round((1 - price / market_avg) * 100, 1)
     grade = _classify_grade(discount_rate)
+    risk = _calc_risk_score(all_trades, current, market_avg)
+    trend = _calc_price_trend(all_trades, current)
 
     normalized = _normalize_trade_row(current)
     return {
@@ -262,6 +406,8 @@ def _enrich(all_trades: list[dict], current: dict) -> dict | None:
         "market_avg": market_avg,
         "discount_rate": discount_rate,
         "grade": grade,
+        "risk": risk,
+        "price_trend": trend,
     }
 
 
