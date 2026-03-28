@@ -323,14 +323,14 @@ def _calc_risk_score(all_trades: list[dict], current: dict, market_avg: float) -
     elif len(frequent) >= 3:
         score += 10
 
-    # 4. 시세 초과 가격 — 시세보다 15% 이상 높은 경우
+    # 4. 급격한 가격 하락 — 시세 대비 25% 이상 할인 (비정상적 급매 패턴)
     price = _safe_float(current.get("price"))
-    if market_avg > 0 and price > market_avg * 1.15:
+    if market_avg > 0 and price < market_avg * 0.75:
         score += 20
-        signals.append("시세 초과 가격")
+        signals.append("급격한 가격 하락")
 
     score = min(100, score)
-    level = "위험" if score >= 60 else "주의" if score >= 30 else "낮음"
+    level = "위험" if score >= 60 else "주의" if score >= 20 else "낮음"
     return {"score": score, "level": level, "signals": signals}
 
 
@@ -351,7 +351,7 @@ def _calc_price_trend(all_trades: list[dict], current: dict) -> dict | None:
         and _safe_float(t.get("price")) > 0
     ]
 
-    if len(relevant) < 4:
+    if len(relevant) < 3:
         return None
 
     relevant.sort(key=lambda t: _get_deal_date(t))
