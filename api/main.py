@@ -325,7 +325,7 @@ def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dic
 
     try:
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.0-flash",
             contents=prompt,
         )
         text = response.text.strip()
