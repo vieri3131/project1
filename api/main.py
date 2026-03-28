@@ -390,6 +390,10 @@ def _calc_price_trend(all_trades: list[dict], current: dict) -> dict | None:
 
 
 def _enrich(all_trades: list[dict], current: dict) -> dict | None:
+    # 취소된 거래는 급매 분석 대상에서 제외 (but all_trades에는 남아 risk 계산에 활용)
+    if current.get("is_cancelled"):
+        return None
+
     market_avg = _calc_market_avg(all_trades, current)
     if not market_avg:
         return None
@@ -485,6 +489,7 @@ def _fetch_raw_trades(
             floor,
             transaction_type,
             is_cancelled,
+            registration_date,
             properties!inner (
                 apt_seq,
                 apt_name,
@@ -495,7 +500,6 @@ def _fetch_raw_trades(
             )
             """
         )
-        .eq("is_cancelled", False)
         .order("deal_date", desc=True)
     )
 
