@@ -536,45 +536,11 @@ def health():
 
 @app.get("/regions")
 def get_regions():
-    sb = get_supabase()
-
-    try:
-        result = sb.table("properties").select("region_code,dong").limit(50000).execute()
-        rows = result.data or []
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"regions query failed: {str(e)}")
-
-    names = {"전체"}
+    # DB 조회 없이 설정된 42개 타겟 지역을 항상 반환
+    # DB 기반으로 반환하면 데이터가 없는 경기/인천 지역이 드롭다운에서 사라지는 버그 발생
     items = [{"code": "ALL", "name": "전체", "display_order": 0}]
-
-    for row in rows:
-        code = row.get("region_code")
-        district_name = CODE_TO_REGION_NAME.get(code)
-        if district_name and district_name not in names:
-            names.add(district_name)
-            items.append(
-                {
-                    "code": code,
-                    "name": district_name,
-                    "display_order": len(items),
-                }
-            )
-
-    # district 매핑이 거의 없는 경우를 대비해 dong도 fallback으로 추가
-    if len(items) <= 1:
-        dongs = sorted({row.get("dong") for row in rows if row.get("dong")})
-        for dong_name in dongs:
-            if dong_name not in names:
-                names.add(dong_name)
-                items.append(
-                    {
-                        "code": "",
-                        "name": dong_name,
-                        "display_order": len(items),
-                    }
-                )
-
-    items.sort(key=lambda x: x["display_order"])
+    for i, (name, code) in enumerate(REGION_NAME_TO_CODE.items(), start=1):
+        items.append({"code": code, "name": name, "display_order": i})
 
     return {
         "success": True,
