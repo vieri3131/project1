@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -19,6 +20,8 @@ CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "*")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 _gemini_client = None
+_ai_cache: dict = {}
+_AI_CACHE_MAX = 200
 
 def _get_gemini():
     global _gemini_client
@@ -267,8 +270,24 @@ def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dic
     if not client or not items:
         return items
 
-    contexts = []
+    # Per-item cache: skip items already analyzed today
+    uncached_items = []
+    cached_results = {}
     for item in items:
+        cache_key = str(item.get("id"))
+        if cache_key in _ai_cache:
+            cached_results[cache_key] = _ai_cache[cache_key]
+        else:
+            uncached_items.append(item)
+
+    if not uncached_items:
+        return [
+            {**item, **cached_results.get(str(item.get("id")), {})}
+            for item in items
+        ]
+
+    contexts = []
+    for item in uncached_items:
         props = item.get("properties") or {}
         apt_seq = props.get("apt_seq")
         area = _safe_float(props.get("area_size"))
@@ -325,7 +344,7 @@ def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dic
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash-preview-04-17",
             contents=prompt,
         )
         text = response.text.strip()
@@ -341,9 +360,26 @@ def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dic
         results = json.loads(text[start:end])
         ai_map = {str(r["id"]): r for r in results if "id" in r}
 
+        # Save new results to cache
+        global _ai_cache
+        for item in uncached_items:
+            key = str(item.get("id"))
+            ai = ai_map.get(key)
+            if ai:
+                _ai_cache[key] = {
+                    k: v for k, v in ai.items() if k in ("risk", "price_trend")
+                }
+        if len(_ai_cache) > _AI_CACHE_MAX:
+            # Evict oldest half
+            keys = list(_ai_cache.keys())
+            for k in keys[:len(keys) // 2]:
+                del _ai_cache[k]
+
+        # Merge AI + cached results into all items
         merged = []
         for item in items:
-            ai = ai_map.get(str(item.get("id")))
+            key = str(item.get("id"))
+            ai = ai_map.get(key) or cached_results.get(key)
             if ai:
                 item = {**item}
                 if "risk" in ai and ai["risk"]:
