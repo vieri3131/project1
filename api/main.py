@@ -178,43 +178,9 @@ def _normalize_trade_row(row: dict) -> dict:
     }
 
 
-<<<<<<< HEAD
 def _fetch_same_apartment_12m_trades(current: dict, months: int = 12, area_tolerance: float = 3.0) -> list[dict]:
     """현재 매물과 같은 아파트(apt_seq 우선), 같은 면적대의 최근 12개월 거래를 DB에서 직접 조회한다."""
     sb = get_supabase()
-=======
-def _get_area(t: dict) -> float:
-    return _safe_float((t.get("properties") or {}).get("area_size"))
-
-
-def _get_apt_seq(t: dict) -> str | None:
-    return (t.get("properties") or {}).get("apt_seq")
-
-
-def _get_region(t: dict) -> str | None:
-    return (t.get("properties") or {}).get("region_code")
-
-
-def _get_date(t: dict):
-    d = t.get("deal_date")
-    if d:
-        try:
-            return date.fromisoformat(str(d)[:10])
-        except ValueError:
-            return None
-    return None
-
-
-def _calc_market_avg(all_trades: list[dict], current: dict) -> float | None:
-    """12개월치 DB 데이터를 월별로 평균 낸 후, 12로 고정 나눈 평균 시세.
-
-    사용자 요청에 맞춰 거래가 없는 달은 0으로 간주한다.
-    1순위: 같은 단지 + 면적 ±10㎡
-    2순위: 같은 지역 + 면적 ±10㎡
-    """
-    today = date.today()
-    current_id = current.get("id")
->>>>>>> d97b0f42ee69bd408766511c802238ced52a7be0
     props = current.get("properties") or {}
 
     apt_seq = props.get("apt_seq")
@@ -222,13 +188,8 @@ def _calc_market_avg(all_trades: list[dict], current: dict) -> float | None:
     region_code = props.get("region_code")
     dong_name = props.get("dong") or props.get("dong_name")
     area = _safe_float(props.get("area_size"))
-    if not apt_seq or area <= 0:
-        return None
+    current_id = current.get("id")
 
-    start = _months_ago(today, 11)
-    month_keys = _last_n_month_keys(today, 12)
-
-<<<<<<< HEAD
     start_date = _months_ago(date.today(), months).isoformat()
 
     query = (
@@ -257,7 +218,6 @@ def _calc_market_avg(all_trades: list[dict], current: dict) -> float | None:
         .order("deal_date", desc=True)
     )
 
-    # 같은 아파트: apt_seq 우선, 없으면 이름+지역+동 기준
     if apt_seq:
         query = query.eq("properties.apt_seq", str(apt_seq))
     else:
@@ -300,56 +260,6 @@ def _calc_same_apartment_market_avg_12m(current: dict) -> tuple[float | None, in
 
     avg = sum(prices) / len(prices)
     return round(avg), len(prices)
-=======
-    def valid(t: dict) -> bool:
-        if t.get("id") == current_id:
-            return False
-        if t.get("is_cancelled"):
-            return False
-        if _safe_float(t.get("price")) <= 0:
-            return False
-        d = _get_date(t)
-        if not d or d < start:
-            return False
-        return True
-
-    valids = [t for t in all_trades if valid(t)]
-
-    def monthly_avg(pool: list[dict]) -> float | None:
-        if not pool:
-            return None
-        monthly: dict[str, list[float]] = {k: [] for k in month_keys}
-        for t in pool:
-            d = _get_date(t)
-            if not d:
-                continue
-            key = f"{d.year:04d}-{d.month:02d}"
-            if key in monthly:
-                monthly[key].append(_safe_float(t.get("price")))
-        total = 0.0
-        has_any = False
-        for k in month_keys:
-            if monthly[k]:
-                total += sum(monthly[k]) / len(monthly[k])
-                has_any = True
-        if not has_any:
-            return None
-        return round(total / 12)
-
-    same_apt_pool = [
-        t for t in valids
-        if _get_apt_seq(t) == apt_seq and abs(_get_area(t) - area) <= 10
-    ]
-    avg = monthly_avg(same_apt_pool)
-    if avg:
-        return avg
-
-    same_region_pool = [
-        t for t in valids
-        if _get_region(t) == region_code and abs(_get_area(t) - area) <= 10
-    ]
-    return monthly_avg(same_region_pool)
->>>>>>> d97b0f42ee69bd408766511c802238ced52a7be0
 
 
 def _classify_grade(discount_rate: float) -> str:
@@ -364,11 +274,6 @@ def _classify_grade(discount_rate: float) -> str:
 
 def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dict]:
     global _ai_cache
-<<<<<<< HEAD
-    """Call Gemini to generate risk badge and price trend for the page results.
-    Falls back to rule-based values already in each item if Gemini is unavailable or fails."""
-=======
->>>>>>> d97b0f42ee69bd408766511c802238ced52a7be0
     client = _get_gemini()
     if not client or not items:
         return items
@@ -454,10 +359,6 @@ def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dic
         results = json.loads(text[start:end])
         ai_map = {str(r["id"]): r for r in results if "id" in r}
 
-<<<<<<< HEAD
-        # Save new results to cache
-=======
->>>>>>> d97b0f42ee69bd408766511c802238ced52a7be0
         for item in uncached_items:
             key = str(item.get("id"))
             ai = ai_map.get(key)
@@ -508,7 +409,6 @@ def _enrich(all_trades: list[dict], current: dict) -> dict | None:
         "market_avg_method": "same_apartment_last_12_months",
         "discount_rate": discount_rate,
         "grade": grade,
-        "market_avg_method": "last_12_months_fixed_divide_12",
         "risk": {"score": 0, "level": "낮음", "signals": []},
         "price_trend": None,
     }
