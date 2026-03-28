@@ -5,7 +5,7 @@ import re
 from datetime import date
 from typing import Any
 
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,14 +18,13 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "*")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-_gemini_model = None
+_gemini_client = None
 
 def _get_gemini():
-    global _gemini_model
-    if _gemini_model is None and GEMINI_API_KEY:
-        genai.configure(api_key=GEMINI_API_KEY)
-        _gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-    return _gemini_model
+    global _gemini_client
+    if _gemini_client is None and GEMINI_API_KEY:
+        _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+    return _gemini_client
 
 supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -404,8 +403,8 @@ def _calc_price_trend(all_trades: list[dict], current: dict) -> dict | None:
 def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dict]:
     """Call Gemini to generate risk badge and price trend for the page results.
     Falls back to rule-based values already in each item if Gemini is unavailable or fails."""
-    model = _get_gemini()
-    if not model or not items:
+    client = _get_gemini()
+    if not client or not items:
         return items
 
     contexts = []
@@ -463,7 +462,10 @@ def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dic
 price_trend가 없으면: {{"id":"<id>","risk":{{...}},"price_trend":null}}"""
 
     try:
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt,
+        )
         text = response.text.strip()
         start = text.find("[")
         end = text.rfind("]") + 1
