@@ -299,27 +299,29 @@ def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dic
             ],
         })
 
-    prompt = f"""한국 아파트 매물 {len(contexts)}개를 분석하여 각 매물의 위험도와 가격 추세를 JSON 배열로만 반환하세요. 설명 없이 JSON만 출력하세요.
+    prompt = f"""한국 아파트 매물 {len(contexts)}개를 분석하세요. 반드시 모든 매물에 대해 risk와 price_trend를 반환하세요. 설명 없이 JSON 배열만 출력하세요.
 
 매물 데이터:
 {json.dumps(contexts, ensure_ascii=False)}
 
-위험도 분석 기준:
-- 취소율: cancelled=true 비율 (40%+ → 35점 "취소율 높음", 20%+ → 15점 "취소율 주의")
-- 등기 지연: deal_date→reg_date 일수 (90일+ → 25점 "등기 지연 이상", 60일+ → 10점 "등기 지연 주의")
-- 단기 거래 집중: 최근 6개월 거래 (4건+ → 20점 "단기 거래 집중", 3건 → 10점)
-- 급격한 가격 하락: price < market_avg * 0.75 → 20점 "급격한 가격 하락"
+【위험도 분석 규칙】
+- 취소율: cancelled=true 비율 (40%+ → +35점 "취소율 높음", 20%+ → +15점 "취소율 주의")
+- 등기 지연: deal_date→reg_date 일수 (90일+ → +25점 "등기 지연 이상", 60일+ → +10점 "등기 지연 주의")
+- 단기 거래 집중: 최근 6개월 거래 4건+ → +20점 "단기 거래 집중"
+- 급격한 가격 하락: discount_pct >= 25 → +20점 "급격한 가격 하락"
+- 거래 데이터 없음: recent_trades가 0건 → +10점 "거래 이력 없음"
 - level: score>=60 "위험", score>=20 "주의", score<20 "낮음"
 
-가격 추세 기준:
-- recent_trades 가격으로 선형 추세 계산 (3건 미만이면 price_trend를 null로)
-- trend_rate: 월별 가격 변화율(%)
-- direction: trend_rate>=0.5 "상승", <=-0.5 "하락", else "보합"
-- forecast_3m: 3개월 후 예상 가격(만원 정수)
+【가격 추세 규칙】
+- recent_trades가 3건 이상이면 실제 가격 데이터로 선형 추세 계산
+- recent_trades가 1~2건이면 discount_pct 기반으로 추정 (discount_pct>=20 → "하락" 추정, discount_pct<10 → "보합")
+- recent_trades가 0건이면 discount_pct 기반 추정 (큰 할인=하락 압력 의미)
+- 반드시 price_trend를 null로 두지 말고 항상 값을 반환할 것
+- trend_rate: 월별 가격 변화율(%), direction: trend_rate>=0.5 "상승"/"하락"/"보합"
+- forecast_3m: 3개월 후 예상 가격(만원 정수, market_avg 기준으로 추정)
 
-반환 형식 (JSON 배열만):
-[{{"id":"<id>","risk":{{"score":0,"level":"낮음","signals":[]}},"price_trend":{{"direction":"보합","trend_rate":0.0,"forecast_3m":0,"data_points":0}}}}]
-price_trend가 없으면: {{"id":"<id>","risk":{{...}},"price_trend":null}}"""
+【반환 형식 — JSON 배열만, 마크다운 없이】
+[{{"id":"<id>","risk":{{"score":0,"level":"낮음","signals":[]}},"price_trend":{{"direction":"보합","trend_rate":0.0,"forecast_3m":0,"data_points":0}}}}]"""
 
     try:
         response = client.models.generate_content(
@@ -327,9 +329,14 @@ price_trend가 없으면: {{"id":"<id>","risk":{{...}},"price_trend":null}}"""
             contents=prompt,
         )
         text = response.text.strip()
+        # Strip markdown code fences if present
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1]
+            text = text.rsplit("```", 1)[0].strip()
         start = text.find("[")
         end = text.rfind("]") + 1
         if start == -1 or end == 0:
+            print(f"[Gemini] No JSON array found in response: {text[:200]}", flush=True)
             return items
         results = json.loads(text[start:end])
         ai_map = {str(r["id"]): r for r in results if "id" in r}
@@ -341,12 +348,13 @@ price_trend가 없으면: {{"id":"<id>","risk":{{...}},"price_trend":null}}"""
                 item = {**item}
                 if "risk" in ai and ai["risk"]:
                     item["risk"] = ai["risk"]
-                if "price_trend" in ai:
+                if "price_trend" in ai and ai["price_trend"]:
                     item["price_trend"] = ai["price_trend"]
             merged.append(item)
         return merged
-    except Exception:
-        return items  # keep rule-based values
+    except Exception as e:
+        print(f"[Gemini] _ai_enrich_risk_trend failed: {e}", flush=True)
+        return items
 
 
 def _enrich(all_trades: list[dict], current: dict) -> dict | None:
