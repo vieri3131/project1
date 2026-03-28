@@ -77,7 +77,7 @@ def parse_rgs_date(val):
     try:
         parts = val.split(".")
         return f"20{parts[0]}-{parts[1]}-{parts[2]}"
-    except:
+    except (IndexError, ValueError):
         return None
 
 def parse_item(item, region_code):
@@ -148,9 +148,9 @@ def batch_upsert_properties(properties):
             seen[key] = True
             unique.append(p)
 
-    # 배치 upsert (한 번에 전송)
+    # 배치 upsert (한 번에 전송) — ignore_duplicates=True: 이미 존재하는 행은 덮어쓰지 않음
     supabase.table("properties").upsert(
-        unique, on_conflict="apt_seq,area_size"
+        unique, on_conflict="apt_seq,area_size", ignore_duplicates=True
     ).execute()
 
     # ID 조회 (apt_seq 목록으로 한 번에)
