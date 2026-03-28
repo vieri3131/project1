@@ -47,7 +47,7 @@ REGION_CODES = [
     "28200",  # 남동구 (구월, 논현)
 ]
 
-def get_year_month_range(months=3):
+def get_year_month_range(months=12):
     result = []
     today = datetime.today()
     seen = set()
@@ -201,7 +201,7 @@ def batch_upsert_transactions(transactions, id_map):
         ).execute()
 
 def main():
-    periods = get_year_month_range(months=2)
+    periods = get_year_month_range(months=12)
     total = 0
 
     for region_code in REGION_CODES:

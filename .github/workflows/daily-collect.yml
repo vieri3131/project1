@@ -1,12 +1,12 @@
-name: Daily Data Collection
+name: Daily Data Collection and Alerts
 
 on:
   schedule:
-    - cron: "0 0 * * *"  # 매일 오전 9시 KST (UTC+9 → UTC 00:00)
-  workflow_dispatch:        # 수동 실행 버튼도 활성화
+    - cron: "0 0 * * *"  # 매일 오전 9시 KST
+  workflow_dispatch:
 
 jobs:
-  collect:
+  collect-and-alert:
     runs-on: ubuntu-latest
 
     steps:
@@ -27,3 +27,14 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python collect.py
+
+      - name: Run send_alerts.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
+          API_PUBLIC_BASE_URL: ${{ secrets.API_PUBLIC_BASE_URL }}
+          UNSUBSCRIBE_SECRET: ${{ secrets.UNSUBSCRIBE_SECRET }}
+        run: python send_alerts.py
