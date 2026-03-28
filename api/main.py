@@ -166,90 +166,89 @@ def _normalize_trade_row(row: dict) -> dict:
     }
 
 
-def _calc_market_avg(all_trades: list[dict], current: dict) -> float | None:
-    today = date.today()
-    six_months_ago = _months_ago(today, 6)
-    one_year_ago = _months_ago(today, 12)
-
+def _fetch_same_apartment_12m_trades(current: dict, months: int = 12, area_tolerance: float = 3.0) -> list[dict]:
+    """현재 매물과 같은 아파트(apt_seq 우선), 같은 면적대의 최근 12개월 거래를 DB에서 직접 조회한다."""
+    sb = get_supabase()
     props = current.get("properties") or {}
+
     apt_seq = props.get("apt_seq")
+    apt_name = props.get("apt_name")
     region_code = props.get("region_code")
+    dong_name = props.get("dong") or props.get("dong_name")
     area = _safe_float(props.get("area_size"))
     current_id = current.get("id")
 
-    def valid(t: dict) -> bool:
-        if t.get("id") == current_id:
-            return False
-        if t.get("is_cancelled"):
-            return False
-        price = _safe_float(t.get("price"))
+    start_date = _months_ago(date.today(), months).isoformat()
+
+    query = (
+        sb.table("transactions")
+        .select(
+            """
+            id,
+            price,
+            deal_date,
+            floor,
+            transaction_type,
+            is_cancelled,
+            registration_date,
+            properties!inner (
+                apt_seq,
+                apt_name,
+                region_code,
+                dong,
+                area_size,
+                build_year
+            )
+            """
+        )
+        .gte("deal_date", start_date)
+        .eq("is_cancelled", False)
+        .order("deal_date", desc=True)
+    )
+
+    # 같은 아파트: apt_seq 우선, 없으면 이름+지역+동 기준
+    if apt_seq:
+        query = query.eq("properties.apt_seq", str(apt_seq))
+    else:
+        if apt_name:
+            query = query.eq("properties.apt_name", str(apt_name))
+        if region_code:
+            query = query.eq("properties.region_code", str(region_code))
+        if dong_name:
+            query = query.eq("properties.dong", str(dong_name))
+
+    if area > 0:
+        query = query.gte("properties.area_size", area - area_tolerance)
+        query = query.lte("properties.area_size", area + area_tolerance)
+
+    result = query.execute()
+    rows = result.data or []
+
+    filtered = []
+    for row in rows:
+        if row.get("id") == current_id:
+            continue
+        if row.get("is_cancelled"):
+            continue
+        price = _safe_float(row.get("price"))
         if price <= 0:
-            return False
-        return True
+            continue
+        filtered.append(row)
 
-    def get_area(t: dict) -> float:
-        return _safe_float((t.get("properties") or {}).get("area_size"))
+    return filtered
 
-    def get_apt_seq(t: dict) -> str | None:
-        return (t.get("properties") or {}).get("apt_seq")
 
-    def get_region(t: dict) -> str | None:
-        return (t.get("properties") or {}).get("region_code")
-
-    def get_date(t: dict):
-        d = t.get("deal_date")
-        if d:
-            try:
-                return date.fromisoformat(str(d)[:10])
-            except ValueError:
-                return None
-        return None
-
-    valids = [t for t in all_trades if valid(t)]
-
-    # 1순위: 같은 단지 + 면적 ±5 + 최근 6개월
-    pool = [
-        t
-        for t in valids
-        if get_apt_seq(t) == apt_seq
-        and abs(get_area(t) - area) <= 5
-        and (get_date(t) or date.min) >= six_months_ago
-    ]
-
-    # 2순위: 같은 단지 + 면적 ±10 + 최근 12개월
-    if len(pool) < 2:
-        pool = [
-            t
-            for t in valids
-            if get_apt_seq(t) == apt_seq
-            and abs(get_area(t) - area) <= 10
-            and (get_date(t) or date.min) >= one_year_ago
-        ]
-
-    # 3순위: 같은 지역 + 면적 ±10 + 최근 12개월
-    if len(pool) < 2:
-        pool = [
-            t
-            for t in valids
-            if get_region(t) == region_code
-            and abs(get_area(t) - area) <= 10
-            and (get_date(t) or date.min) >= one_year_ago
-        ]
-
-    # 4순위: 같은 지역 + 면적 ±15
-    if len(pool) < 2:
-        pool = [
-            t
-            for t in valids
-            if get_region(t) == region_code
-            and abs(get_area(t) - area) <= 15
-        ]
-
+def _calc_same_apartment_market_avg_12m(current: dict) -> tuple[float | None, int]:
+    pool = _fetch_same_apartment_12m_trades(current, months=12, area_tolerance=3.0)
     if not pool:
-        return None
+        return None, 0
 
-    avg = sum(_safe_float(t.get("price")) for t in pool) / len(pool)
-    return round(avg)
+    prices = [_safe_float(t.get("price")) for t in pool if _safe_float(t.get("price")) > 0]
+    if not prices:
+        return None, 0
+
+    avg = sum(prices) / len(prices)
+    return round(avg), len(prices)
 
 
 def _classify_grade(discount_rate: float) -> str:
@@ -264,6 +263,7 @@ def _classify_grade(discount_rate: float) -> str:
 
 
 def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dict]:
+    global _ai_cache
     """Call Gemini to generate risk badge and price trend for the page results.
     Falls back to rule-based values already in each item if Gemini is unavailable or fails."""
     client = _get_gemini()
@@ -361,7 +361,6 @@ def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dic
         ai_map = {str(r["id"]): r for r in results if "id" in r}
 
         # Save new results to cache
-        global _ai_cache
         for item in uncached_items:
             key = str(item.get("id"))
             ai = ai_map.get(key)
@@ -398,7 +397,7 @@ def _enrich(all_trades: list[dict], current: dict) -> dict | None:
     if current.get("is_cancelled"):
         return None
 
-    market_avg = _calc_market_avg(all_trades, current)
+    market_avg, market_avg_count = _calc_same_apartment_market_avg_12m(current)
     if not market_avg:
         return None
 
@@ -413,6 +412,9 @@ def _enrich(all_trades: list[dict], current: dict) -> dict | None:
     return {
         **normalized,
         "market_avg": market_avg,
+        "market_avg_count": market_avg_count,
+        "market_avg_period_months": 12,
+        "market_avg_method": "same_apartment_last_12_months",
         "discount_rate": discount_rate,
         "grade": grade,
         "risk": {"score": 0, "level": "낮음", "signals": []},
