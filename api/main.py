@@ -1,9 +1,11 @@
+import json
 import math
 import os
 import re
 from datetime import date
 from typing import Any
 
+import google.generativeai as genai
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +16,16 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "*")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+_gemini_model = None
+
+def _get_gemini():
+    global _gemini_model
+    if _gemini_model is None and GEMINI_API_KEY:
+        genai.configure(api_key=GEMINI_API_KEY)
+        _gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+    return _gemini_model
 
 supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_KEY:
@@ -389,6 +401,92 @@ def _calc_price_trend(all_trades: list[dict], current: dict) -> dict | None:
     }
 
 
+def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dict]:
+    """Call Gemini to generate risk badge and price trend for the page results.
+    Falls back to rule-based values already in each item if Gemini is unavailable or fails."""
+    model = _get_gemini()
+    if not model or not items:
+        return items
+
+    contexts = []
+    for item in items:
+        props = item.get("properties") or {}
+        apt_seq = props.get("apt_seq")
+        area = _safe_float(props.get("area_size"))
+        current_id = item.get("id")
+
+        apt_trades = [
+            t for t in all_trades
+            if (t.get("properties") or {}).get("apt_seq") == apt_seq
+            and t.get("id") != current_id
+        ]
+        apt_trades.sort(key=lambda t: t.get("deal_date") or "0000-00-00", reverse=True)
+        apt_trades = apt_trades[:12]
+
+        contexts.append({
+            "id": current_id,
+            "price": int(_safe_float(item.get("price"))),
+            "market_avg": int(_safe_float(item.get("market_avg"))),
+            "discount_pct": _safe_float(item.get("discount_rate")),
+            "area_sqm": area,
+            "recent_trades": [
+                {
+                    "date": t.get("deal_date"),
+                    "price": int(_safe_float(t.get("price"))),
+                    "cancelled": bool(t.get("is_cancelled")),
+                    "reg_date": t.get("registration_date"),
+                }
+                for t in apt_trades
+            ],
+        })
+
+    prompt = f"""한국 아파트 매물 {len(contexts)}개를 분석하여 각 매물의 위험도와 가격 추세를 JSON 배열로만 반환하세요. 설명 없이 JSON만 출력하세요.
+
+매물 데이터:
+{json.dumps(contexts, ensure_ascii=False)}
+
+위험도 분석 기준:
+- 취소율: cancelled=true 비율 (40%+ → 35점 "취소율 높음", 20%+ → 15점 "취소율 주의")
+- 등기 지연: deal_date→reg_date 일수 (90일+ → 25점 "등기 지연 이상", 60일+ → 10점 "등기 지연 주의")
+- 단기 거래 집중: 최근 6개월 거래 (4건+ → 20점 "단기 거래 집중", 3건 → 10점)
+- 급격한 가격 하락: price < market_avg * 0.75 → 20점 "급격한 가격 하락"
+- level: score>=60 "위험", score>=20 "주의", score<20 "낮음"
+
+가격 추세 기준:
+- recent_trades 가격으로 선형 추세 계산 (3건 미만이면 price_trend를 null로)
+- trend_rate: 월별 가격 변화율(%)
+- direction: trend_rate>=0.5 "상승", <=-0.5 "하락", else "보합"
+- forecast_3m: 3개월 후 예상 가격(만원 정수)
+
+반환 형식 (JSON 배열만):
+[{{"id":"<id>","risk":{{"score":0,"level":"낮음","signals":[]}},"price_trend":{{"direction":"보합","trend_rate":0.0,"forecast_3m":0,"data_points":0}}}}]
+price_trend가 없으면: {{"id":"<id>","risk":{{...}},"price_trend":null}}"""
+
+    try:
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+        start = text.find("[")
+        end = text.rfind("]") + 1
+        if start == -1 or end == 0:
+            return items
+        results = json.loads(text[start:end])
+        ai_map = {str(r["id"]): r for r in results if "id" in r}
+
+        merged = []
+        for item in items:
+            ai = ai_map.get(str(item.get("id")))
+            if ai:
+                item = {**item}
+                if "risk" in ai and ai["risk"]:
+                    item["risk"] = ai["risk"]
+                if "price_trend" in ai:
+                    item["price_trend"] = ai["price_trend"]
+            merged.append(item)
+        return merged
+    except Exception:
+        return items  # keep rule-based values
+
+
 def _enrich(all_trades: list[dict], current: dict) -> dict | None:
     # 취소된 거래는 급매 분석 대상에서 제외 (but all_trades에는 남아 risk 계산에 활용)
     if current.get("is_cancelled"):
@@ -622,6 +720,7 @@ def get_filter(
         enriched.sort(key=lambda t: _safe_float(t.get("discount_rate")), reverse=True)
 
         sliced, pagination = _paginate(enriched, page, per_page)
+        sliced = _ai_enrich_risk_trend(sliced, all_trades)
 
         return {
             "success": True,
