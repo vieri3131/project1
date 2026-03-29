@@ -113,8 +113,11 @@ REGION_NAME_TO_CODE = {
 }
 CODE_TO_REGION_NAME = {v: k for k, v in REGION_NAME_TO_CODE.items()}
 VALID_GRADES = {"초급매", "급매", "저평가", "일반"}
-MAX_ALL_REGION_FETCH = 500
-MAX_ALL_REGION_RECENT_FETCH = 500
+MAX_ALL_REGION_SOURCE_FETCH = 8000
+MAX_ALL_REGION_MARKET_FETCH = 12000
+MAX_FILTER_RESULTS = 500
+MAX_PER_PAGE = 500
+BATCH_FETCH_SIZE = 1000
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -202,16 +205,7 @@ def _is_all_region_request(*, region_code: str | None = None, region: str | None
     picked_dong = str(dong or "").strip()
     return not region_code and not picked_dong and (not picked_region or picked_region == "전체")
 
-
-def _fetch_recent_12m_trades(*, region_code: str | None = None, region: str | None = None, dong: str | None = None, min_area: float | None = None, max_area: float | None = None, months: int = 12) -> list[dict]:
-    """필터 범위 안의 최근 N개월 거래를 한 번만 조회한다."""
-    sb = get_supabase()
-    start_date = _months_ago(date.today(), months).isoformat()
-
-    query = (
-        sb.table("transactions")
-        .select(
-            """
+_TRANSACTION_SELECT = """
             id,
             price,
             deal_date,
@@ -228,16 +222,95 @@ def _fetch_recent_12m_trades(*, region_code: str | None = None, region: str | No
                 build_year
             )
             """
+
+
+def _build_transaction_query(*, region_code: str | None = None, region: str | None = None, dong: str | None = None, min_area: float | None = None, max_area: float | None = None, start_date: str | None = None, exclude_cancelled: bool = False):
+    sb = get_supabase()
+    query = sb.table("transactions").select(_TRANSACTION_SELECT)
+    if start_date:
+        query = query.gte("deal_date", start_date)
+    if exclude_cancelled:
+        query = query.eq("is_cancelled", False)
+    query = query.order("deal_date", desc=True)
+    return _apply_base_filters(query, region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
+
+
+def _fetch_query_rows(query_factory, *, limit: int | None = None, batch_size: int = BATCH_FETCH_SIZE) -> list[dict]:
+    if limit is None:
+        result = query_factory().execute()
+        return result.data or []
+
+    rows: list[dict] = []
+    start = 0
+    while len(rows) < limit:
+        chunk_size = min(batch_size, limit - len(rows))
+        end = start + chunk_size - 1
+        result = query_factory().range(start, end).execute()
+        batch = result.data or []
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < chunk_size:
+            break
+        start += len(batch)
+    return rows[:limit]
+
+
+def _normalize_transaction_type(value: Any) -> str:
+    return str(value or "").strip().replace(" ", "")
+
+
+def _is_direct_transaction(row: dict) -> bool:
+    tx_type = _normalize_transaction_type(row.get("transaction_type"))
+    return "직거래" in tx_type
+
+
+def _is_eligible_trade(row: dict) -> bool:
+    if row.get("is_cancelled"):
+        return False
+    if _is_direct_transaction(row):
+        return False
+    return _safe_float(row.get("price")) > 0
+
+
+def _representative_trade_key(row: dict) -> str | None:
+    props = row.get("properties") or {}
+    apt_key = _apartment_base_key(props)
+    area = _safe_float(props.get("area_size"))
+    if not apt_key or area <= 0:
+        return None
+    return f"{apt_key}|area:{area:.4f}"
+
+
+def _pick_representative_trades(rows: list[dict]) -> list[dict]:
+    picked: dict[str, dict] = {}
+    for row in rows:
+        if not _is_eligible_trade(row):
+            continue
+        rep_key = _representative_trade_key(row)
+        if not rep_key or rep_key in picked:
+            continue
+        picked[rep_key] = row
+    return list(picked.values())
+
+
+def _fetch_recent_12m_trades(*, region_code: str | None = None, region: str | None = None, dong: str | None = None, min_area: float | None = None, max_area: float | None = None, months: int = 12) -> list[dict]:
+    """필터 범위 안의 최근 N개월 거래를 한 번만 조회한다."""
+    start_date = _months_ago(date.today(), months).isoformat()
+
+    def query_factory():
+        return _build_transaction_query(
+            region_code=region_code,
+            region=region,
+            dong=dong,
+            min_area=min_area,
+            max_area=max_area,
+            start_date=start_date,
+            exclude_cancelled=True,
         )
-        .gte("deal_date", start_date)
-        .eq("is_cancelled", False)
-        .order("deal_date", desc=True)
-    )
-    query = _apply_base_filters(query, region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
-    if _is_all_region_request(region_code=region_code, region=region, dong=dong):
-        query = query.limit(MAX_ALL_REGION_RECENT_FETCH)
-    result = query.execute()
-    return result.data or []
+
+    limit = MAX_ALL_REGION_MARKET_FETCH if _is_all_region_request(region_code=region_code, region=region, dong=dong) else None
+    return _fetch_query_rows(query_factory, limit=limit)
 
 
 def _group_trades_by_apartment(rows: list[dict]) -> dict[str, list[dict]]:
@@ -263,7 +336,7 @@ def _calc_market_avg_from_group(current: dict, group: list[dict]) -> tuple[float
     for row in group:
         if row.get("id") == current_id:
             continue
-        if row.get("is_cancelled"):
+        if not _is_eligible_trade(row):
             continue
 
         row_props = row.get("properties") or {}
@@ -414,7 +487,7 @@ def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dic
 
 
 def _enrich(current: dict, market_avg_lookup: dict[str, list[dict]]) -> dict | None:
-    if current.get("is_cancelled"):
+    if not _is_eligible_trade(current):
         return None
 
     props = current.get("properties") or {}
@@ -438,7 +511,7 @@ def _enrich(current: dict, market_avg_lookup: dict[str, list[dict]]) -> dict | N
         "market_avg": market_avg,
         "market_avg_count": market_avg_count,
         "market_avg_period_months": 12,
-        "market_avg_method": "same_apartment_last_12_months",
+        "market_avg_method": "same_apartment_last_12_months_exact_area",
         "discount_rate": discount_rate,
         "grade": grade,
         "risk": {"score": 0, "level": "낮음", "signals": []},
@@ -448,7 +521,7 @@ def _enrich(current: dict, market_avg_lookup: dict[str, list[dict]]) -> dict | N
 
 def _paginate(items: list[dict], page: int, per_page: int) -> tuple[list[dict], dict]:
     safe_page = max(1, page)
-    safe_per_page = max(1, min(100, per_page))
+    safe_per_page = max(1, min(MAX_PER_PAGE, per_page))
     total = len(items)
     start = (safe_page - 1) * safe_per_page
     end = start + safe_per_page
@@ -482,49 +555,44 @@ def _apply_base_filters(query, region_code: str | None = None, region: str | Non
 
 
 def _fetch_raw_trades(*, region_code: str | None = None, region: str | None = None, dong: str | None = None, min_area: float | None = None, max_area: float | None = None) -> list[dict]:
-    sb = get_supabase()
-    query = (
-        sb.table("transactions")
-        .select(
-            """
-            id,
-            price,
-            deal_date,
-            floor,
-            transaction_type,
-            is_cancelled,
-            registration_date,
-            properties!inner (
-                apt_seq,
-                apt_name,
-                region_code,
-                dong,
-                area_size,
-                build_year
-            )
-            """
+    def query_factory():
+        return _build_transaction_query(
+            region_code=region_code,
+            region=region,
+            dong=dong,
+            min_area=min_area,
+            max_area=max_area,
         )
-        .order("deal_date", desc=True)
-    )
-    query = _apply_base_filters(query, region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
-    if _is_all_region_request(region_code=region_code, region=region, dong=dong):
-        query = query.limit(MAX_ALL_REGION_RECENT_FETCH)
-    result = query.execute()
-    return result.data or []
+
+    limit = MAX_ALL_REGION_SOURCE_FETCH if _is_all_region_request(region_code=region_code, region=region, dong=dong) else None
+    return _fetch_query_rows(query_factory, limit=limit)
 
 
 def _build_enriched_results(*, region_code: str | None = None, region: str | None = None, dong: str | None = None, min_area: float | None = None, max_area: float | None = None, min_discount: float = 0, grade: str | None = None) -> tuple[list[dict], list[dict]]:
     all_trades = _fetch_raw_trades(region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
     recent_12m_trades = _fetch_recent_12m_trades(region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area, months=12)
     market_avg_lookup = _build_market_avg_lookup(recent_12m_trades)
+    representative_trades = _pick_representative_trades(all_trades)
 
-    enriched = [r for t in all_trades if (r := _enrich(t, market_avg_lookup))]
+    enriched = [r for t in representative_trades if (r := _enrich(t, market_avg_lookup))]
     if min_discount:
         enriched = [t for t in enriched if _safe_float(t.get("discount_rate")) >= min_discount]
     if grade and grade in VALID_GRADES:
         enriched = [t for t in enriched if t.get("grade") == grade]
-    enriched.sort(key=lambda t: _safe_float(t.get("discount_rate")), reverse=True)
-    return enriched, all_trades
+
+    enriched.sort(
+        key=lambda t: (
+            _safe_float(t.get("discount_rate")),
+            str(t.get("deal_date") or ""),
+            _safe_float(t.get("price")),
+        ),
+        reverse=True,
+    )
+
+    if _is_all_region_request(region_code=region_code, region=region, dong=dong):
+        enriched = enriched[:MAX_FILTER_RESULTS]
+
+    return enriched, recent_12m_trades
 
 
 def build_matches_for_subscription(subscription: dict, limit: int | None = None) -> list[dict]:
@@ -569,7 +637,7 @@ def get_regions():
 
 
 @app.get("/listings")
-def get_listings(region_code: str = Query(None), region: str = Query(None), dong: str = Query(None), min_area: float = Query(None), max_area: float = Query(None), page: int = Query(1, ge=1), per_page: int = Query(100, ge=1, le=500)):
+def get_listings(region_code: str = Query(None), region: str = Query(None), dong: str = Query(None), min_area: float = Query(None), max_area: float = Query(None), page: int = Query(1, ge=1), per_page: int = Query(500, ge=1, le=500)):
     try:
         data = _fetch_raw_trades(region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
         normalized = [_normalize_trade_row(row) for row in data]
@@ -580,7 +648,7 @@ def get_listings(region_code: str = Query(None), region: str = Query(None), dong
 
 
 @app.get("/filter")
-def get_filter(region_code: str = Query(None), region: str = Query(None), dong: str = Query(None), min_area: float = Query(None), max_area: float = Query(None), min_discount: float = Query(0), grade: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(100, ge=1, le=500)):
+def get_filter(region_code: str = Query(None), region: str = Query(None), dong: str = Query(None), min_area: float = Query(None), max_area: float = Query(None), min_discount: float = Query(0), grade: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(500, ge=1, le=500)):
     try:
         enriched, all_trades = _build_enriched_results(region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area, min_discount=min_discount, grade=grade)
         sliced, pagination = _paginate(enriched, page, per_page)
