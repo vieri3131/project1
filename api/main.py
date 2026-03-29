@@ -231,7 +231,7 @@ def _build_transaction_query(*, region_code: str | None = None, region: str | No
         query = query.gte("deal_date", start_date)
     if exclude_cancelled:
         query = query.eq("is_cancelled", False)
-    query = query.order("deal_date", desc=True)
+    query = query.order("deal_date", desc=True).order("registration_date", desc=True)
     return _apply_base_filters(query, region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
 
 
@@ -282,9 +282,18 @@ def _representative_trade_key(row: dict) -> str | None:
     return f"{apt_key}|area:{area:.4f}"
 
 
+def _trade_sort_key(row: dict) -> tuple[str, str, str]:
+    return (
+        str(row.get("deal_date") or ""),
+        str(row.get("registration_date") or ""),
+        str(row.get("id") or ""),
+    )
+
+
 def _pick_representative_trades(rows: list[dict]) -> list[dict]:
+    ordered = sorted(rows, key=_trade_sort_key, reverse=True)
     picked: dict[str, dict] = {}
-    for row in rows:
+    for row in ordered:
         if not _is_eligible_trade(row):
             continue
         rep_key = _representative_trade_key(row)
@@ -569,9 +578,79 @@ def _fetch_raw_trades(*, region_code: str | None = None, region: str | None = No
 
 
 def _build_enriched_results(*, region_code: str | None = None, region: str | None = None, dong: str | None = None, min_area: float | None = None, max_area: float | None = None, min_discount: float = 0, grade: str | None = None) -> tuple[list[dict], list[dict]]:
-    all_trades = _fetch_raw_trades(region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
-    recent_12m_trades = _fetch_recent_12m_trades(region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area, months=12)
+    recent_12m_trades = _fetch_recent_12m_trades(
+        region_code=region_code,
+        region=region,
+        dong=dong,
+        min_area=min_area,
+        max_area=max_area,
+        months=12,
+    )
     market_avg_lookup = _build_market_avg_lookup(recent_12m_trades)
+
+    all_region = _is_all_region_request(region_code=region_code, region=region, dong=dong)
+
+    def passes_filters(item: dict) -> bool:
+        if min_discount and _safe_float(item.get("discount_rate")) < min_discount:
+            return False
+        if grade and grade in VALID_GRADES and item.get("grade") != grade:
+            return False
+        return True
+
+    if all_region:
+        enriched: list[dict] = []
+        seen_rep_keys: set[str] = set()
+
+        def query_factory():
+            return _build_transaction_query(
+                region_code=region_code,
+                region=region,
+                dong=dong,
+                min_area=min_area,
+                max_area=max_area,
+            )
+
+        start = 0
+        while len(enriched) < MAX_FILTER_RESULTS:
+            end = start + BATCH_FETCH_SIZE - 1
+            result = query_factory().range(start, end).execute()
+            batch = result.data or []
+            if not batch:
+                break
+
+            for row in batch:
+                if not _is_eligible_trade(row):
+                    continue
+                rep_key = _representative_trade_key(row)
+                if not rep_key or rep_key in seen_rep_keys:
+                    continue
+                seen_rep_keys.add(rep_key)
+
+                enriched_row = _enrich(row, market_avg_lookup)
+                if not enriched_row:
+                    continue
+                if not passes_filters(enriched_row):
+                    continue
+
+                enriched.append(enriched_row)
+                if len(enriched) >= MAX_FILTER_RESULTS:
+                    break
+
+            if len(batch) < BATCH_FETCH_SIZE:
+                break
+            start += len(batch)
+
+        enriched.sort(
+            key=lambda t: (
+                str(t.get("deal_date") or ""),
+                str(t.get("registration_date") or ""),
+                _safe_float(t.get("discount_rate")),
+            ),
+            reverse=True,
+        )
+        return enriched, recent_12m_trades
+
+    all_trades = _fetch_raw_trades(region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
     representative_trades = _pick_representative_trades(all_trades)
 
     enriched = [r for t in representative_trades if (r := _enrich(t, market_avg_lookup))]
@@ -582,16 +661,12 @@ def _build_enriched_results(*, region_code: str | None = None, region: str | Non
 
     enriched.sort(
         key=lambda t: (
-            _safe_float(t.get("discount_rate")),
             str(t.get("deal_date") or ""),
-            _safe_float(t.get("price")),
+            str(t.get("registration_date") or ""),
+            _safe_float(t.get("discount_rate")),
         ),
         reverse=True,
     )
-
-    if _is_all_region_request(region_code=region_code, region=region, dong=dong):
-        enriched = enriched[:MAX_FILTER_RESULTS]
-
     return enriched, recent_12m_trades
 
 
