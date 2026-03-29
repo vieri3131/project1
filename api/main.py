@@ -178,18 +178,25 @@ def _normalize_trade_row(row: dict) -> dict:
     }
 
 
-def _fetch_same_apartment_12m_trades(current: dict, months: int = 12, area_tolerance: float = 3.0) -> list[dict]:
-    """현재 매물과 같은 아파트(apt_seq 우선), 같은 면적대의 최근 12개월 거래를 DB에서 직접 조회한다."""
+def _apartment_base_key(props: dict) -> str | None:
+    apt_seq = str(props.get("apt_seq") or "").strip()
+    if apt_seq:
+        return f"seq:{apt_seq}"
+
+    apt_name = str(props.get("apt_name") or "").strip()
+    region_code = str(props.get("region_code") or "").strip()
+    dong_name = str(props.get("dong") or props.get("dong_name") or "").strip()
+
+    if apt_name and region_code and dong_name:
+        return f"name:{apt_name}|rc:{region_code}|dong:{dong_name}"
+    if apt_name and region_code:
+        return f"name:{apt_name}|rc:{region_code}"
+    return None
+
+
+def _fetch_recent_12m_trades(*, region_code: str | None = None, region: str | None = None, dong: str | None = None, min_area: float | None = None, max_area: float | None = None, months: int = 12) -> list[dict]:
+    """필터 범위 안의 최근 N개월 거래를 한 번만 조회한다."""
     sb = get_supabase()
-    props = current.get("properties") or {}
-
-    apt_seq = props.get("apt_seq")
-    apt_name = props.get("apt_name")
-    region_code = props.get("region_code")
-    dong_name = props.get("dong") or props.get("dong_name")
-    area = _safe_float(props.get("area_size"))
-    current_id = current.get("id")
-
     start_date = _months_ago(date.today(), months).isoformat()
 
     query = (
@@ -217,49 +224,56 @@ def _fetch_same_apartment_12m_trades(current: dict, months: int = 12, area_toler
         .eq("is_cancelled", False)
         .order("deal_date", desc=True)
     )
-
-    if apt_seq:
-        query = query.eq("properties.apt_seq", str(apt_seq))
-    else:
-        if apt_name:
-            query = query.eq("properties.apt_name", str(apt_name))
-        if region_code:
-            query = query.eq("properties.region_code", str(region_code))
-        if dong_name:
-            query = query.eq("properties.dong", str(dong_name))
-
-    if area > 0:
-        query = query.gte("properties.area_size", area - area_tolerance)
-        query = query.lte("properties.area_size", area + area_tolerance)
-
+    query = _apply_base_filters(query, region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
     result = query.execute()
-    rows = result.data or []
+    return result.data or []
 
-    filtered = []
+
+def _group_trades_by_apartment(rows: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {}
     for row in rows:
+        props = row.get("properties") or {}
+        key = _apartment_base_key(props)
+        if not key:
+            continue
+        groups.setdefault(key, []).append(row)
+    return groups
+
+
+def _calc_market_avg_from_group(current: dict, group: list[dict], area_tolerance: float = 3.0) -> tuple[float | None, int]:
+    if not group:
+        return None, 0
+
+    props = current.get("properties") or {}
+    current_id = current.get("id")
+    current_area = _safe_float(props.get("area_size"))
+
+    prices: list[float] = []
+    for row in group:
         if row.get("id") == current_id:
             continue
         if row.get("is_cancelled"):
             continue
+
+        row_props = row.get("properties") or {}
+        row_area = _safe_float(row_props.get("area_size"))
+        if current_area > 0 and row_area > 0 and abs(row_area - current_area) > area_tolerance:
+            continue
+
         price = _safe_float(row.get("price"))
         if price <= 0:
             continue
-        filtered.append(row)
+        prices.append(price)
 
-    return filtered
-
-
-def _calc_same_apartment_market_avg_12m(current: dict) -> tuple[float | None, int]:
-    pool = _fetch_same_apartment_12m_trades(current, months=12, area_tolerance=3.0)
-    if not pool:
-        return None, 0
-
-    prices = [_safe_float(t.get("price")) for t in pool if _safe_float(t.get("price")) > 0]
     if not prices:
         return None, 0
 
     avg = sum(prices) / len(prices)
     return round(avg), len(prices)
+
+
+def _build_market_avg_lookup(rows: list[dict]) -> dict[str, list[dict]]:
+    return _group_trades_by_apartment(rows)
 
 
 def _classify_grade(discount_rate: float) -> str:
@@ -386,11 +400,16 @@ def _ai_enrich_risk_trend(items: list[dict], all_trades: list[dict]) -> list[dic
         return items
 
 
-def _enrich(all_trades: list[dict], current: dict) -> dict | None:
+def _enrich(current: dict, market_avg_lookup: dict[str, list[dict]]) -> dict | None:
     if current.get("is_cancelled"):
         return None
 
-    market_avg, market_avg_count = _calc_same_apartment_market_avg_12m(current)
+    props = current.get("properties") or {}
+    apt_key = _apartment_base_key(props)
+    if not apt_key:
+        return None
+
+    market_avg, market_avg_count = _calc_market_avg_from_group(current, market_avg_lookup.get(apt_key, []))
     if not market_avg:
         return None
 
@@ -481,7 +500,10 @@ def _fetch_raw_trades(*, region_code: str | None = None, region: str | None = No
 
 def _build_enriched_results(*, region_code: str | None = None, region: str | None = None, dong: str | None = None, min_area: float | None = None, max_area: float | None = None, min_discount: float = 0, grade: str | None = None) -> tuple[list[dict], list[dict]]:
     all_trades = _fetch_raw_trades(region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
-    enriched = [r for t in all_trades if (r := _enrich(all_trades, t))]
+    recent_12m_trades = _fetch_recent_12m_trades(region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area, months=12)
+    market_avg_lookup = _build_market_avg_lookup(recent_12m_trades)
+
+    enriched = [r for t in all_trades if (r := _enrich(t, market_avg_lookup))]
     if min_discount:
         enriched = [t for t in enriched if _safe_float(t.get("discount_rate")) >= min_discount]
     if grade and grade in VALID_GRADES:
