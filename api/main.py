@@ -113,6 +113,8 @@ REGION_NAME_TO_CODE = {
 }
 CODE_TO_REGION_NAME = {v: k for k, v in REGION_NAME_TO_CODE.items()}
 VALID_GRADES = {"초급매", "급매", "저평가", "일반"}
+MAX_ALL_REGION_FETCH = 500
+MAX_ALL_REGION_RECENT_FETCH = 500
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -194,6 +196,13 @@ def _apartment_base_key(props: dict) -> str | None:
     return None
 
 
+
+def _is_all_region_request(*, region_code: str | None = None, region: str | None = None, dong: str | None = None) -> bool:
+    picked_region = str(region or "").strip()
+    picked_dong = str(dong or "").strip()
+    return not region_code and not picked_dong and (not picked_region or picked_region == "전체")
+
+
 def _fetch_recent_12m_trades(*, region_code: str | None = None, region: str | None = None, dong: str | None = None, min_area: float | None = None, max_area: float | None = None, months: int = 12) -> list[dict]:
     """필터 범위 안의 최근 N개월 거래를 한 번만 조회한다."""
     sb = get_supabase()
@@ -225,6 +234,8 @@ def _fetch_recent_12m_trades(*, region_code: str | None = None, region: str | No
         .order("deal_date", desc=True)
     )
     query = _apply_base_filters(query, region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
+    if _is_all_region_request(region_code=region_code, region=region, dong=dong):
+        query = query.limit(MAX_ALL_REGION_RECENT_FETCH)
     result = query.execute()
     return result.data or []
 
@@ -240,7 +251,7 @@ def _group_trades_by_apartment(rows: list[dict]) -> dict[str, list[dict]]:
     return groups
 
 
-def _calc_market_avg_from_group(current: dict, group: list[dict], area_tolerance: float = 3.0) -> tuple[float | None, int]:
+def _calc_market_avg_from_group(current: dict, group: list[dict]) -> tuple[float | None, int]:
     if not group:
         return None, 0
 
@@ -257,7 +268,9 @@ def _calc_market_avg_from_group(current: dict, group: list[dict], area_tolerance
 
         row_props = row.get("properties") or {}
         row_area = _safe_float(row_props.get("area_size"))
-        if current_area > 0 and row_area > 0 and abs(row_area - current_area) > area_tolerance:
+
+        # 면적 허용오차 제거: 같은 아파트 내에서도 완전 동일 면적만 비교
+        if current_area > 0 and row_area > 0 and row_area != current_area:
             continue
 
         price = _safe_float(row.get("price"))
@@ -494,6 +507,8 @@ def _fetch_raw_trades(*, region_code: str | None = None, region: str | None = No
         .order("deal_date", desc=True)
     )
     query = _apply_base_filters(query, region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
+    if _is_all_region_request(region_code=region_code, region=region, dong=dong):
+        query = query.limit(MAX_ALL_REGION_RECENT_FETCH)
     result = query.execute()
     return result.data or []
 
@@ -554,7 +569,7 @@ def get_regions():
 
 
 @app.get("/listings")
-def get_listings(region_code: str = Query(None), region: str = Query(None), dong: str = Query(None), min_area: float = Query(None), max_area: float = Query(None), page: int = Query(1, ge=1), per_page: int = Query(100, ge=1, le=100)):
+def get_listings(region_code: str = Query(None), region: str = Query(None), dong: str = Query(None), min_area: float = Query(None), max_area: float = Query(None), page: int = Query(1, ge=1), per_page: int = Query(100, ge=1, le=500)):
     try:
         data = _fetch_raw_trades(region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area)
         normalized = [_normalize_trade_row(row) for row in data]
@@ -565,7 +580,7 @@ def get_listings(region_code: str = Query(None), region: str = Query(None), dong
 
 
 @app.get("/filter")
-def get_filter(region_code: str = Query(None), region: str = Query(None), dong: str = Query(None), min_area: float = Query(None), max_area: float = Query(None), min_discount: float = Query(0), grade: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(100, ge=1, le=100)):
+def get_filter(region_code: str = Query(None), region: str = Query(None), dong: str = Query(None), min_area: float = Query(None), max_area: float = Query(None), min_discount: float = Query(0), grade: str = Query(None), page: int = Query(1, ge=1), per_page: int = Query(100, ge=1, le=500)):
     try:
         enriched, all_trades = _build_enriched_results(region_code=region_code, region=region, dong=dong, min_area=min_area, max_area=max_area, min_discount=min_discount, grade=grade)
         sliced, pagination = _paginate(enriched, page, per_page)
